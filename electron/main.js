@@ -12,7 +12,7 @@
  *   - external links open in the system browser, never in the window
  *   - clear error boxes when the DSH host cannot be started
  */
-import { app, BrowserWindow, shell, dialog, session } from 'electron';
+import { app, BrowserWindow, shell, dialog, session, screen } from 'electron';
 import { spawn } from 'node:child_process';
 import { openSync, appendFileSync, writeSync } from 'node:fs';
 
@@ -164,11 +164,19 @@ const SPLASH = `data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype htm
 async function createWindow() {
   debugLog('createWindow start');
   lifeLog('createWindow');
+  // Size the window to the actual screen work area: a window larger than the
+  // display would overflow off-screen (Windows does not shrink it), leaving
+  // the right/bottom edges — and the settings panel — invisible.
+  const wa = screen.getPrimaryDisplay().workAreaSize;
+  const forced = (process.env.DSH_WINDOW_SIZE ?? '').split('x').map(Number);
+  const winW = forced[0] > 0 ? Math.min(forced[0], 1280) : Math.min(1280, wa.width);
+  const winH = forced[1] > 0 ? Math.min(forced[1], 940) : Math.min(940, Math.max(600, wa.height - 16));
+  lifeLog(`window size ${winW}x${winH} (work area ${wa.width}x${wa.height})`);
   win = new BrowserWindow({
-    width: 1280,
-    height: 940,
-    minWidth: 940,
-    minHeight: 600,
+    width: winW,
+    height: winH,
+    minWidth: Math.min(940, winW),
+    minHeight: Math.min(600, winH),
     title: 'Deepseek Harness',
     backgroundColor: '#070b10',
     autoHideMenuBar: true,
