@@ -209,6 +209,9 @@ async function createWindow() {
         if (Math.abs(w2 - winW) > 8 || Math.abs(h2 - winH) > 8) {
           lifeLog(`dpr ${dprN}: resizing window ${winW}x${winH} -> ${w2}x${h2}`);
           win.setSize(w2, h2);
+          // The window was centered in the virtual (physical-pixel) space;
+          // re-center on the real display so no edge ends up off-screen.
+          win.center();
           winW = w2; winH = h2;
         }
       })
