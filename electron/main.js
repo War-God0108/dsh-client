@@ -219,8 +219,12 @@ async function createWindow() {
   };
 
   // Compact the official settings panel (scoped to the settings modal) so all
-  // sections — including the plugin rows 讯飞语音识别/背景 — are visible
-  // without scrolling on typical desktop windows. No-op if the web UI changes.
+  // sections — including the plugin rows 讯飞语音识别/背景 — are visible with
+  // minimal vertical chrome. The options area scrolls natively when the window
+  // is short, so nothing is ever clipped. No-op if the web UI changes.
+  // NOTE: plugin sections (dsh-web-bg 背景 / dsh-voice) must stay EXPANDED —
+  // auto-collapsing them (data-dshcollapsed) hid the sliders/buttons and broke
+  // parity with the web UI.
   const SETTINGS_COMPACT_CSS = `
     .VOzbGW_panel { height: calc(100dvh - 16px) !important; }
     .VOzbGW_options [class$="_row"] { padding-top: 6px !important; padding-bottom: 6px !important; }
@@ -282,6 +286,12 @@ async function createWindow() {
   await win.loadURL(DSH_URL);
   lifeLog('official UI loaded');
   debugLog('official UI loaded');
+  // Bring the window to the foreground: launched from the background (or
+  // double-clicked while another window has focus) it can otherwise stay
+  // hidden behind the browser.
+  win.show();
+  win.moveTop();
+  win.focus();
 }
 
 // Single instance: focus the existing window instead of spawning another.
@@ -294,7 +304,13 @@ if (!gotLock) {
   app.on('second-instance', () => {
     if (win) {
       if (win.isMinimized()) win.restore();
+      // Aggressively bring the window to the front: plain focus() is often
+      // ignored by Windows' foreground-lock when another app has focus.
+      win.show();
+      win.setAlwaysOnTop(true);
+      win.moveTop();
       win.focus();
+      setTimeout(() => win.setAlwaysOnTop(false), 250);
     }
   });
 
