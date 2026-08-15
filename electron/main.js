@@ -34,7 +34,7 @@ const lifeLog = (msg) => {
 const debugLog = process.env.DSH_CLIENT_DEBUG
   ? (msg) => { try { appendFileSync(process.env.DSH_CLIENT_DEBUG, `${new Date().toISOString()} ${msg}\n`); } catch { /* noop */ } }
   : () => {};
-lifeLog(`boot: DSH_URL=${DSH_URL}`);
+lifeLog(`boot: v${app.getVersion()} DSH_URL=${DSH_URL}`);
 
 const HOST_START_TIMEOUT_MS = 120000; // first `npx` run may download the package
 
@@ -184,10 +184,10 @@ async function createWindow() {
   // sections — including the plugin rows 讯飞语音识别/背景 — are visible
   // without scrolling on typical desktop windows. No-op if the web UI changes.
   const SETTINGS_COMPACT_CSS = `
-    .VOzbGW_panel { height: calc(100dvh - 24px) !important; }
+    .VOzbGW_panel { height: calc(100dvh - 16px) !important; }
     .VOzbGW_options [class$="_row"] { padding-top: 6px !important; padding-bottom: 6px !important; }
     .VOzbGW_options [class$="_group"] { padding-top: 6px !important; padding-bottom: 6px !important; }
-    .VOzbGW_options [class$="_themeCube"] { height: 60px !important; padding: 6px !important; }
+    .VOzbGW_options [class$="_themeCube"] { height: 52px !important; padding: 6px !important; }
   `;
   win.webContents.on('did-finish-load', () => {
     win.webContents.insertCSS(SETTINGS_COMPACT_CSS).catch(() => {});
