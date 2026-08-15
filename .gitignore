@@ -1,0 +1,14 @@
+# dependencies（npm install 可重建）
+node_modules/
+
+# 构建缓存（自动重建）
+.npm-cache/
+.builder-cache/
+
+# 打包产物（dist 里的两个 exe 是可再生的，保留在磁盘上但不入版本库）
+dist/
+
+# 日志与临时文件
+*.log
+.smoke-*
+diag-*

@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DSH CLIENT — DeepSeek Harness 控制台</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<div class="app" id="app">
+  <!-- ============ TOP BAR ============ -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-glyph">◈</span>
+      <span class="brand-name">DSH&nbsp;CLIENT</span>
+      <span class="brand-sub">deepseek harness · cockpit</span>
+    </div>
+    <div class="hostinfo" id="hostinfo">
+      <span class="chip" id="chip-conn"><span class="dot" id="dot-conn"></span><span id="txt-conn">连接中…</span></span>
+      <span class="chip mono" id="chip-model">—</span>
+      <span class="chip mono" id="chip-version">—</span>
+      <span class="chip mono" id="chip-cwd" title="">—</span>
+    </div>
+  </header>
+
+  <!-- ============ BODY ============ -->
+  <div class="body">
+    <!-- LEFT: sessions -->
+    <aside class="sidebar">
+      <div class="side-head">
+        <span class="side-title">SESSIONS</span>
+        <button class="btn-new" id="btn-new" title="新建会话">＋ NEW</button>
+      </div>
+      <div class="session-list" id="session-list">
+        <div class="empty" id="session-empty">尚无会话</div>
+      </div>
+      <div class="side-foot mono" id="side-foot">target: —</div>
+    </aside>
+
+    <!-- CENTER: conversation -->
+    <main class="conversation" id="conversation">
+      <div class="conv-head" id="conv-head">
+        <div class="conv-title-wrap">
+          <div class="conv-title" id="conv-title">未选择会话</div>
+          <div class="conv-meta mono" id="conv-meta"></div>
+        </div>
+        <div class="telemetry" id="telemetry"></div>
+      </div>
+      <div class="conv-scroll" id="conv-scroll">
+        <div class="messages" id="messages">
+          <div class="empty" id="msg-empty">◈ 从左侧选择一个会话，或新建一个会话开始</div>
+        </div>
+      </div>
+      <div class="composer" id="composer" hidden>
+        <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行…" spellcheck="false"></textarea>
+        <div class="composer-bar">
+          <span class="composer-hint mono" id="composer-hint"></span>
+          <button class="btn-send" id="btn-send">发送 ↵</button>
+          <button class="btn-stop" id="btn-stop" hidden>■ 停止</button>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
