@@ -166,7 +166,7 @@ async function createWindow() {
   lifeLog('createWindow');
   win = new BrowserWindow({
     width: 1280,
-    height: 840,
+    height: 940,
     minWidth: 940,
     minHeight: 600,
     title: 'Deepseek Harness',
@@ -178,6 +178,19 @@ async function createWindow() {
       nodeIntegration: false,
       sandbox: true,
     },
+  });
+
+  // Compact the official settings panel (scoped to the settings modal) so all
+  // sections — including the plugin rows 讯飞语音识别/背景 — are visible
+  // without scrolling on typical desktop windows. No-op if the web UI changes.
+  const SETTINGS_COMPACT_CSS = `
+    .VOzbGW_panel { height: calc(100dvh - 24px) !important; }
+    .VOzbGW_options [class$="_row"] { padding-top: 6px !important; padding-bottom: 6px !important; }
+    .VOzbGW_options [class$="_group"] { padding-top: 6px !important; padding-bottom: 6px !important; }
+    .VOzbGW_options [class$="_themeCube"] { height: 60px !important; padding: 6px !important; }
+  `;
+  win.webContents.on('did-finish-load', () => {
+    win.webContents.insertCSS(SETTINGS_COMPACT_CSS).catch(() => {});
   });
 
   // External links -> system browser; navigation stays inside the DSH origin.
