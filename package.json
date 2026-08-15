@@ -1,9 +1,9 @@
 {
   "name": "dsh-client",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "DSH Client — 桌面端 DeepSeek Harness（Electron 窗口嵌入官方网页界面）",
-  "author": "DSH Client",
+  "description": "Deepseek Harness — 桌面端（Electron 窗口嵌入官方网页界面）",
+  "author": "Deepseek Harness",
   "type": "module",
   "main": "electron/main.js",
   "scripts": {
@@ -22,8 +22,8 @@
     "ws": "^8.18.0"
   },
   "build": {
-    "appId": "com.dshclient.app",
-    "productName": "DSH CLIENT",
+    "appId": "com.deepseekharness.client",
+    "productName": "Deepseek Harness",
     "asar": true,
     "electronDist": "node_modules/electron/dist",
     "directories": {
@@ -57,11 +57,15 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "DSH CLIENT",
+      "shortcutName": "Deepseek Harness",
       "artifactName": "${productName}-Setup-${version}.${ext}"
     },
     "portable": {
       "artifactName": "${productName}-Portable-${version}.${ext}"
     }
+  },
+  "allowScripts": {
+    "electron@33.4.11": true,
+    "electron-winstaller@5.4.0": true
   }
 }

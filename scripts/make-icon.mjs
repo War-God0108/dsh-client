@@ -1,60 +1,39 @@
-// Generate the DSH CLIENT app icon: deep-sea cockpit diamond on navy grid.
+// Generate the Deepseek Harness app icon: the official white whale
+// (build/whale.svg, from the DSH web UI favicon) on a deep navy rounded square.
 import { createRequire } from 'node:module';
-import { writeFile, mkdir } from 'node:fs/promises';
+import { writeFile, mkdir, readFile } from 'node:fs/promises';
 const require = createRequire(import.meta.url);
 const sharp = require('C:/Users/31259/AppData/Local/npm-cache/_npx/1e7f6d9597241db0/node_modules/sharp');
 
 const S = 1024; // master canvas
+
+// Pull the whale path out of build/whale.svg
+const whaleSrc = await readFile('build/whale.svg', 'utf8');
+const dMatch = whaleSrc.match(/<path[^>]*\bd="([^"]+)"/);
+if (!dMatch) throw new Error('whale.svg: path element not found');
+const WHALE_PATH = dMatch[1];
+
+// Scale the 50x50 whale onto the canvas (~78% of it, optically centered)
+const scale = (S * 0.78) / 50;
+const offset = (S - 50 * scale) / 2;
+
 const svg = `
 <svg width="${S}" height="${S}" viewBox="0 0 ${S} ${S}" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <radialGradient id="bg" cx="50%" cy="42%" r="75%">
-      <stop offset="0%" stop-color="#0e1a26"/>
-      <stop offset="55%" stop-color="#0a1119"/>
-      <stop offset="100%" stop-color="#060a0f"/>
+    <radialGradient id="bg" cx="50%" cy="38%" r="85%">
+      <stop offset="0%" stop-color="#13212f"/>
+      <stop offset="60%" stop-color="#0b1017"/>
+      <stop offset="100%" stop-color="#06090d"/>
     </radialGradient>
-    <linearGradient id="dia" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#5ff0e8"/>
-      <stop offset="100%" stop-color="#1f9d97"/>
-    </linearGradient>
-    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
-      <feGaussianBlur stdDeviation="18" result="b"/>
-      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
   </defs>
 
-  <!-- navy cockpit background -->
-  <rect width="${S}" height="${S}" fill="url(#bg)"/>
+  <!-- deep navy rounded square -->
+  <rect x="24" y="24" width="976" height="976" rx="210" fill="url(#bg)"/>
 
-  <!-- sonar rings -->
-  <g fill="none" stroke="#16303f" stroke-width="6">
-    <circle cx="512" cy="470" r="340"/>
-    <circle cx="512" cy="470" r="262"/>
-    <circle cx="512" cy="470" r="184"/>
+  <!-- the white whale -->
+  <g transform="translate(${offset.toFixed(2)} ${offset.toFixed(2)}) scale(${scale.toFixed(4)})">
+    <path d="${WHALE_PATH}" fill="#ffffff"/>
   </g>
-  <!-- crosshair ticks -->
-  <g stroke="#1d3f52" stroke-width="6">
-    <line x1="512" y1="96" x2="512" y2="150"/>
-    <line x1="512" y1="790" x2="512" y2="844"/>
-    <line x1="138" y1="470" x2="192" y2="470"/>
-    <line x1="832" y1="470" x2="886" y2="470"/>
-  </g>
-
-  <!-- faint grid -->
-  <g stroke="#12222f" stroke-width="3" opacity="0.8">
-    <line x1="256" y1="130" x2="256" y2="810"/>
-    <line x1="768" y1="130" x2="768" y2="810"/>
-    <line x1="130" y1="256" x2="894" y2="256"/>
-    <line x1="130" y1="684" x2="894" y2="684"/>
-  </g>
-
-  <!-- the diamond glyph -->
-  <g filter="url(#glow)">
-    <polygon points="512,196 788,470 512,744 236,470" fill="none" stroke="url(#dia)" stroke-width="34" stroke-linejoin="round"/>
-  </g>
-  <!-- inner node -->
-  <circle cx="512" cy="470" r="46" fill="url(#dia)"/>
-  <circle cx="512" cy="470" r="18" fill="#05100f"/>
 </svg>`;
 
 await mkdir('build', { recursive: true });

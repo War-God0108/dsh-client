@@ -1,4 +1,4 @@
-# DSH CLIENT — DeepSeek Harness 桌面客户端
+# Deepseek Harness — 桌面客户端
 
 独立的 DeepSeek Harness **桌面应用**：Electron 窗口直接嵌入**官方网页界面**——与浏览器里完全相同的布局、全部功能，外加桌面壳层能力（任务栏图标、单实例锁、外链交给系统浏览器）。
 
@@ -9,8 +9,8 @@
 **方式一：使用打包好的 exe（免 Node 环境）**
 
 ```
-dist\DSH CLIENT-Setup-0.2.0.exe       安装器（推荐，装到开始菜单/桌面快捷方式）
-dist\DSH CLIENT-Portable-0.2.0.exe    便携版（免安装，双击即用，适合放 U 盘）
+dist\Deepseek Harness-Setup-0.3.0.exe       安装器（推荐，装到开始菜单/桌面快捷方式）
+dist\Deepseek Harness-Portable-0.3.0.exe    便携版（免安装，双击即用，适合放 U 盘）
 ```
 
 **方式二：源码运行**
@@ -33,7 +33,7 @@ npm start          # 启动桌面窗口
 
 ```bash
 npm run dist       # 或双击「打包exe.cmd」
-# 产物：dist\DSH CLIENT-Setup-*.exe + DSH CLIENT-Portable-*.exe
+# 产物：dist\Deepseek Harness-Setup-*.exe + Deepseek Harness-Portable-*.exe
 ```
 
 打包配置在 `package.json` 的 `build` 字段：NSIS 安装器（可选择安装目录、创建桌面快捷方式）+ portable 单文件。
@@ -42,7 +42,7 @@ npm run dist       # 或双击「打包exe.cmd」
 
 ```
 ┌─────────────────────────────────────────────┐
-│ Electron 窗口（DSH CLIENT 桌面壳层）          │
+│ Electron 窗口（Deepseek Harness 桌面壳层）    │
 │   ├─ 单实例锁（重复启动聚焦已有窗口）          │
 │   ├─ 外链 → 系统浏览器（窗口内导航限制在同源）  │
 │   └─ BrowserWindow ── loadURL(DSH_URL) ──┐  │
@@ -83,7 +83,7 @@ dsh-client/
 ├── 打包exe.cmd           # 双击重新打包 exe
 ├── electron/
 │   └── main.js          # Electron 主进程（窗口壳层，加载官方界面）
-├── build/               # 应用图标（icon.ico 等）
+├── build/               # 应用图标（icon.ico / whale.svg 等）
 ├── dist/                # 打包产物（Setup / Portable）
 ├── server.js            # （历史）本地代理，不再参与打包
 ├── ws-server.js         # （历史）RFC6455 WS 服务器，不再参与打包

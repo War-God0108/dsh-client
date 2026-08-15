@@ -1,5 +1,5 @@
 /**
- * DSH CLIENT — Electron main process.
+ * Deepseek Harness — Electron main process.
  *
  * Opens the official DeepSeek Harness web UI (served by DSH itself at
  * DSH_URL) in a standalone desktop window. The web UI already provides every
@@ -22,7 +22,7 @@ async function createWindow() {
     height: 840,
     minWidth: 940,
     minHeight: 600,
-    title: 'DSH CLIENT — DeepSeek Harness',
+    title: 'Deepseek Harness',
     backgroundColor: '#0b0f14',
     autoHideMenuBar: true,
     webPreferences: {
@@ -48,7 +48,7 @@ async function createWindow() {
   win.webContents.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
     if (!isMainFrame) return;
     dialog.showErrorBox(
-      'DSH CLIENT 无法连接',
+      'Deepseek Harness 无法连接',
       `无法加载 DSH 界面（${DSH_URL}）：\n${desc} (${code})\n\n请确认 DeepSeek Harness 正在运行。`,
     );
     app.quit();
@@ -72,7 +72,7 @@ if (!gotLock) {
   });
 
   app.whenReady().then(createWindow).catch((err) => {
-    dialog.showErrorBox('DSH CLIENT 启动失败', `无法启动窗口：\n${err.message}`);
+    dialog.showErrorBox('Deepseek Harness 启动失败', `无法启动窗口：\n${err.message}`);
     app.quit();
   });
 
