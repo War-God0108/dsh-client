@@ -167,16 +167,22 @@ async function createWindow() {
   // Size the window to the actual screen work area: a window larger than the
   // display would overflow off-screen (Windows does not shrink it), leaving
   // the right/bottom edges — and the settings panel — invisible.
-  const wa = screen.getPrimaryDisplay().workAreaSize;
+  // NOTE: the packaged app runs system-DPI-aware, so the screen API reports
+  // PHYSICAL pixels while the renderer's devicePixelRatio holds the real
+  // scale. We create the window with a first guess, then correct the size
+  // once the renderer reports its DPR (on the first load — the splash).
+  const disp = screen.getPrimaryDisplay();
+  const wa = disp.workAreaSize;
   const forced = (process.env.DSH_WINDOW_SIZE ?? '').split('x').map(Number);
-  const winW = forced[0] > 0 ? Math.min(forced[0], 1280) : Math.min(1280, wa.width);
-  const winH = forced[1] > 0 ? Math.min(forced[1], 940) : Math.min(940, Math.max(600, wa.height - 16));
-  lifeLog(`window size ${winW}x${winH} (work area ${wa.width}x${wa.height})`);
+  let winW = forced[0] > 0 ? Math.min(forced[0], 1280) : Math.min(1280, wa.width);
+  let winH = forced[1] > 0 ? Math.min(forced[1], 940) : Math.min(940, Math.max(600, wa.height - 16));
+  let sizeCorrected = forced[0] > 0;
+  lifeLog(`window size ${winW}x${winH} (work area ${wa.width}x${wa.height}, scaleFactor ${disp.scaleFactor})`);
   win = new BrowserWindow({
     width: winW,
     height: winH,
-    minWidth: Math.min(940, winW),
-    minHeight: Math.min(600, winH),
+    minWidth: 940,
+    minHeight: 600,
     title: 'Deepseek Harness',
     backgroundColor: '#070b10',
     autoHideMenuBar: true,
@@ -187,6 +193,27 @@ async function createWindow() {
       sandbox: true,
     },
   });
+
+  // DPR correction: when the screen API is in physical pixels (scaleFactor≈1)
+  // but the renderer sees a higher device scale, shrink the window so it fits
+  // the real CSS-pixel screen.
+  const correctSizeOnce = () => {
+    if (sizeCorrected) return;
+    sizeCorrected = true;
+    win.webContents.executeJavaScript('window.devicePixelRatio', true)
+      .then((dpr) => {
+        const dprN = Number(dpr);
+        if (!(dprN > 1.05)) return;
+        const w2 = Math.min(1280, Math.round(wa.width / dprN));
+        const h2 = Math.min(940, Math.max(600, Math.round((wa.height - 16) / dprN)));
+        if (Math.abs(w2 - winW) > 8 || Math.abs(h2 - winH) > 8) {
+          lifeLog(`dpr ${dprN}: resizing window ${winW}x${winH} -> ${w2}x${h2}`);
+          win.setSize(w2, h2);
+          winW = w2; winH = h2;
+        }
+      })
+      .catch(() => {});
+  };
 
   // Compact the official settings panel (scoped to the settings modal) so all
   // sections — including the plugin rows 讯飞语音识别/背景 — are visible
@@ -199,6 +226,7 @@ async function createWindow() {
   `;
   win.webContents.on('did-finish-load', () => {
     win.webContents.insertCSS(SETTINGS_COMPACT_CSS).catch(() => {});
+    correctSizeOnce();
   });
 
   // External links -> system browser; navigation stays inside the DSH origin.
