@@ -12,9 +12,9 @@
  *   - external links open in the system browser, never in the window
  *   - clear error boxes when the DSH host cannot be started
  */
-import { app, BrowserWindow, shell, dialog } from 'electron';
+import { app, BrowserWindow, shell, dialog, session } from 'electron';
 import { spawn } from 'node:child_process';
-import { openSync, appendFileSync } from 'node:fs';
+import { openSync, appendFileSync, writeSync } from 'node:fs';
 
 let win = null;
 let hostProc = null; // the DSH host child we spawned (if any)
@@ -22,11 +22,19 @@ let hostSpawnedByUs = false;
 
 const DSH_URL = process.env.DSH_URL ?? 'http://127.0.0.1:3080';
 
-// Optional debug trace (DSH_CLIENT_DEBUG=<file path>) for diagnosing startup.
+// Always-on lifecycle log (small, append-only) so startup/quit problems are
+// diagnosable from the packaged app without any env vars.
+let lifeFd = null;
+try { lifeFd = openSync(`${app.getPath('userData')}\\app.log`, 'a'); } catch { /* ignore */ }
+const lifeLog = (msg) => {
+  try { if (lifeFd) writeSync(lifeFd, `${new Date().toISOString()} ${msg}\n`); } catch { /* noop */ }
+};
+
+// Optional verbose trace (DSH_CLIENT_DEBUG=<file path>) for deep debugging.
 const debugLog = process.env.DSH_CLIENT_DEBUG
   ? (msg) => { try { appendFileSync(process.env.DSH_CLIENT_DEBUG, `${new Date().toISOString()} ${msg}\n`); } catch { /* noop */ } }
   : () => {};
-debugLog(`main.js loaded, DSH_URL=${DSH_URL}`);
+lifeLog(`boot: DSH_URL=${DSH_URL}`);
 
 const HOST_START_TIMEOUT_MS = 120000; // first `npx` run may download the package
 
@@ -61,10 +69,10 @@ function startDshHost() {
   });
   hostProc = child;
   hostSpawnedByUs = true;
-  child.on('error', (err) => { debugLog(`host spawn error: ${err.message}`); console.error('[host] spawn failed', err.message); });
-  child.on('exit', (code) => { debugLog(`host exited with code ${code}`); console.log('[host] exited with code', code); });
+  child.on('error', (err) => { lifeLog(`host spawn error: ${err.message}`); debugLog(`host spawn error: ${err.message}`); });
+  child.on('exit', (code) => { lifeLog(`host exited with code ${code}`); debugLog(`host exited with code ${code}`); });
+  lifeLog(`spawning: ${args.join(' ')}`);
   debugLog(`spawning: ${args.join(' ')}`);
-  console.log('[host] spawning', args.join(' '));
   return child;
 }
 
@@ -84,22 +92,23 @@ async function waitForDsh(timeoutMs = HOST_START_TIMEOUT_MS) {
  *  1. taskkill the spawn tree (cmd -> npx -> node) by PID;
  *  2. netstat the DSH port and taskkill whatever listens there — catches
  *     orphaned trees whose cmd wrapper died early.
- * Returns a promise; the app stays alive until it settles (see will-quit),
- * because Chromium's job object would otherwise kill our taskkill children
- * together with the exiting browser process.
+ * Every step is bounded by a timeout so this can never hang the quit.
  */
 function killHostTree() {
   if (!hostProc || !hostSpawnedByUs) return Promise.resolve();
-  debugLog('killing spawned host (tree + port)');
+  lifeLog('killing spawned host (tree + port)');
   const port = new URL(DSH_URL).port || '80';
   const taskkill = (pid) => new Promise((resolve) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
     try {
       const tk = spawn('taskkill.exe', ['/pid', String(pid), '/T', '/F'], {
         windowsHide: true, stdio: 'ignore',
       });
-      tk.on('exit', resolve);
-      tk.on('error', resolve);
-    } catch { resolve(); }
+      tk.on('exit', finish);
+      tk.on('error', finish);
+      setTimeout(finish, 3000); // never wait forever on taskkill
+    } catch { finish(); }
   });
 
   // 1) the spawn tree
@@ -107,6 +116,8 @@ function killHostTree() {
 
   // 2) whatever listens on the DSH port
   const portKill = new Promise((resolve) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
     try {
       const netstat = spawn('netstat.exe', ['-ano', '-p', 'tcp'], {
         windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
@@ -118,17 +129,18 @@ function killHostTree() {
         const pids = [...new Set(
           out.split(/\r?\n/).map((l) => l.match(re)?.[1]).filter(Boolean),
         )];
-        debugLog(`port ${port} listeners: ${pids.join(',') || 'none'}`);
+        lifeLog(`port ${port} listeners: ${pids.join(',') || 'none'}`);
         await Promise.all(pids.map(taskkill));
-        resolve();
+        finish();
       });
-      netstat.on('error', resolve);
-    } catch { resolve(); }
+      netstat.on('error', finish);
+      setTimeout(finish, 3000); // netstat must not hang us either
+    } catch { finish(); }
   });
 
   return Promise.all([treeKill, portKill]).then(() => {
     hostProc = null;
-    debugLog('host killed');
+    lifeLog('host killed');
   });
 }
 
@@ -151,6 +163,7 @@ const SPLASH = `data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype htm
 
 async function createWindow() {
   debugLog('createWindow start');
+  lifeLog('createWindow');
   win = new BrowserWindow({
     width: 1280,
     height: 840,
@@ -184,6 +197,7 @@ async function createWindow() {
   debugLog('splash loaded');
 
   const dshUp = await probeDsh();
+  lifeLog(`probeDsh -> ${dshUp}`);
   debugLog(`probeDsh -> ${dshUp}`);
   if (!dshUp) {
     const host = new URL(DSH_URL).hostname;
@@ -199,6 +213,7 @@ async function createWindow() {
     }
     startDshHost();
     const started = await waitForDsh();
+    lifeLog(`waitForDsh -> ${started}`);
     debugLog(`waitForDsh -> ${started}`);
     if (!started) {
       dialog.showErrorBox(
@@ -213,11 +228,13 @@ async function createWindow() {
   }
 
   await win.loadURL(DSH_URL);
+  lifeLog('official UI loaded');
   debugLog('official UI loaded');
 }
 
 // Single instance: focus the existing window instead of spawning another.
 const gotLock = app.requestSingleInstanceLock();
+lifeLog(`single instance lock -> ${gotLock}`);
 debugLog(`single instance lock -> ${gotLock}`);
 if (!gotLock) {
   app.quit();
@@ -229,7 +246,16 @@ if (!gotLock) {
     }
   });
 
-  app.whenReady().then(createWindow).catch((err) => {
+  app.whenReady().then(() => {
+    // 允许麦克风权限：语音输入插件需要 getUserMedia({ audio: true })
+    session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+      callback(permission === 'media');
+    });
+    session.defaultSession.setPermissionCheckHandler((_webContents, permission) => {
+      return permission === 'media';
+    });
+    return createWindow();
+  }).catch((err) => {
     dialog.showErrorBox('Deepseek Harness 启动失败', `无法启动窗口：\n${err.message}`);
     app.quit();
   });
@@ -239,11 +265,22 @@ if (!gotLock) {
   });
 
   app.on('will-quit', (e) => {
-    if (hostProc && hostSpawnedByUs) {
-      // Stay alive until the spawned host is really gone (see killHostTree).
-      e.preventDefault();
-      killHostTree().finally(() => app.exit(0));
-    }
+    if (!hostProc || !hostSpawnedByUs) return;
+    // Stay alive until the spawned host is really gone, but NEVER hang the
+    // quit: a hard timeout forces the exit no matter what.
+    e.preventDefault();
+    lifeLog('quit: waiting for host cleanup');
+    let exited = false;
+    const exitNow = () => {
+      if (exited) return;
+      exited = true;
+      lifeLog('quit: exiting');
+      app.exit(0);
+    };
+    const timer = setTimeout(exitNow, 6000);
+    killHostTree()
+      .catch((err) => lifeLog(`quit: cleanup error: ${err?.message ?? err}`))
+      .finally(() => { clearTimeout(timer); exitNow(); });
   });
 
   app.on('window-all-closed', () => {
