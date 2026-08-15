@@ -1,8 +1,8 @@
 {
   "name": "dsh-client",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "DSH Client — 桌面端 DeepSeek Harness 控制台（Electron + 本地代理）",
+  "description": "DSH Client — 桌面端 DeepSeek Harness（Electron 窗口嵌入官方网页界面）",
   "author": "DSH Client",
   "type": "module",
   "main": "electron/main.js",
@@ -32,9 +32,6 @@
     },
     "files": [
       "electron/**/*",
-      "public/**/*",
-      "server.js",
-      "ws-server.js",
       "package.json"
     ],
     "win": {
