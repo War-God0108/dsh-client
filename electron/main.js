@@ -14,13 +14,59 @@
  */
 import { app, BrowserWindow, shell, dialog, session, screen } from 'electron';
 import { spawn } from 'node:child_process';
-import { openSync, appendFileSync, writeSync } from 'node:fs';
+import { openSync, appendFileSync, writeSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 
 let win = null;
 let hostProc = null; // the DSH host child we spawned (if any)
 let hostSpawnedByUs = false;
 
 const DSH_URL = process.env.DSH_URL ?? 'http://127.0.0.1:3080';
+
+// Records the PID of the DSH host that WE spawned, so a later instance can
+// adopt it (clean it up on quit) even though it did not spawn it itself.
+const hostPidFile = `${app.getPath('userData')}\\dsh-host.pid`;
+
+function readHostPid() {
+  try {
+    const v = Number(readFileSync(hostPidFile, 'utf8').trim());
+    return v > 0 ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeHostPid(pid) {
+  try { writeFileSync(hostPidFile, String(pid)); } catch { /* noop */ }
+}
+
+function clearHostPid() {
+  try { unlinkSync(hostPidFile); } catch { /* noop */ }
+}
+
+/** PID currently LISTENING on the DSH port (null if none). */
+function listenerOnDshPort() {
+  const port = new URL(DSH_URL).port || '80';
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    try {
+      const netstat = spawn('netstat.exe', ['-ano', '-p', 'tcp'], {
+        windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      let out = '';
+      netstat.stdout.on('data', (d) => (out += d.toString('latin1')));
+      netstat.on('exit', () => {
+        const re = new RegExp(`:${port}\\s+\\S+\\s+LISTENING\\s+(\\d+)`);
+        const pids = [...new Set(
+          out.split(/\r?\n/).map((l) => l.match(re)?.[1]).filter(Boolean),
+        )];
+        finish(pids[0] ? Number(pids[0]) : null);
+      });
+      netstat.on('error', () => finish(null));
+      setTimeout(() => finish(null), 3000);
+    } catch { finish(null); }
+  });
+}
 
 // Always-on lifecycle log (small, append-only) so startup/quit problems are
 // diagnosable from the packaged app without any env vars.
@@ -69,6 +115,7 @@ function startDshHost() {
   });
   hostProc = child;
   hostSpawnedByUs = true;
+  writeHostPid(child.pid);
   child.on('error', (err) => { lifeLog(`host spawn error: ${err.message}`); debugLog(`host spawn error: ${err.message}`); });
   child.on('exit', (code) => { lifeLog(`host exited with code ${code}`); debugLog(`host exited with code ${code}`); });
   lifeLog(`spawning: ${args.join(' ')}`);
@@ -140,6 +187,7 @@ function killHostTree() {
 
   return Promise.all([treeKill, portKill]).then(() => {
     hostProc = null;
+    clearHostPid();
     lifeLog('host killed');
   });
 }
@@ -164,19 +212,16 @@ const SPLASH = `data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype htm
 async function createWindow() {
   debugLog('createWindow start');
   lifeLog('createWindow');
-  // Size the window to the actual screen work area: a window larger than the
-  // display would overflow off-screen (Windows does not shrink it), leaving
-  // the right/bottom edges — and the settings panel — invisible.
-  // NOTE: the packaged app runs system-DPI-aware, so the screen API reports
-  // PHYSICAL pixels while the renderer's devicePixelRatio holds the real
-  // scale. We create the window with a first guess, then correct the size
-  // once the renderer reports its DPR (on the first load — the splash).
+  // Stay within the available work area. Electron's screen API and
+  // BrowserWindow both report device-independent pixels (the renderer DPR is
+  // already factored in), so no extra division is needed — dividing by
+  // devicePixelRatio again would shrink the app on high-DPI displays and
+  // clip the settings panel.
   const disp = screen.getPrimaryDisplay();
   const wa = disp.workAreaSize;
   const forced = (process.env.DSH_WINDOW_SIZE ?? '').split('x').map(Number);
   let winW = forced[0] > 0 ? Math.min(forced[0], 1280) : Math.min(1280, wa.width);
   let winH = forced[1] > 0 ? Math.min(forced[1], 940) : Math.min(940, Math.max(600, wa.height - 16));
-  let sizeCorrected = forced[0] > 0;
   lifeLog(`window size ${winW}x${winH} (work area ${wa.width}x${wa.height}, scaleFactor ${disp.scaleFactor})`);
   win = new BrowserWindow({
     width: winW,
@@ -194,46 +239,25 @@ async function createWindow() {
     },
   });
 
-  // DPR correction: when the screen API is in physical pixels (scaleFactor≈1)
-  // but the renderer sees a higher device scale, shrink the window so it fits
-  // the real CSS-pixel screen.
-  const correctSizeOnce = () => {
-    if (sizeCorrected) return;
-    sizeCorrected = true;
-    win.webContents.executeJavaScript('window.devicePixelRatio', true)
-      .then((dpr) => {
-        const dprN = Number(dpr);
-        if (!(dprN > 1.05)) return;
-        const w2 = Math.min(1280, Math.round(wa.width / dprN));
-        const h2 = Math.min(940, Math.max(600, Math.round((wa.height - 16) / dprN)));
-        if (Math.abs(w2 - winW) > 8 || Math.abs(h2 - winH) > 8) {
-          lifeLog(`dpr ${dprN}: resizing window ${winW}x${winH} -> ${w2}x${h2}`);
-          win.setSize(w2, h2);
-          // The window was centered in the virtual (physical-pixel) space;
-          // re-center on the real display so no edge ends up off-screen.
-          win.center();
-          winW = w2; winH = h2;
-        }
-      })
-      .catch(() => {});
-  };
-
-  // Compact the official settings panel (scoped to the settings modal) so all
-  // sections — including the plugin rows 讯飞语音识别/背景 — are visible with
-  // minimal vertical chrome. The options area scrolls natively when the window
-  // is short, so nothing is ever clipped. No-op if the web UI changes.
-  // NOTE: plugin sections (dsh-web-bg 背景 / dsh-voice) must stay EXPANDED —
-  // auto-collapsing them (data-dshcollapsed) hid the sliders/buttons and broke
-  // parity with the web UI.
-  const SETTINGS_COMPACT_CSS = `
-    .VOzbGW_panel { height: calc(100dvh - 16px) !important; }
-    .VOzbGW_options [class$="_row"] { padding-top: 6px !important; padding-bottom: 6px !important; }
-    .VOzbGW_options [class$="_group"] { padding-top: 6px !important; padding-bottom: 6px !important; }
-    .VOzbGW_options [class$="_themeCube"] { height: 52px !important; padding: 6px !important; }
+  // Display-only fix, scoped to the settings modal. The panel keeps the web
+  // UI's own layout (size, paddings, native scrolling) — nothing here changes
+  // how it looks. On some displays the presented frame misses parts of the
+  // panel until the element itself is invalidated (hovering a row makes it
+  // appear). Pulse every row's opacity 1 <-> 0.999 while the panel is open:
+  // visually identical, but it keeps each row freshly painted every cycle.
+  // No-op if the web UI changes.
+  const SETTINGS_PAINT_FIX_CSS = `
+    .VOzbGW_options [class$="_row"],
+    .VOzbGW_options [class$="_group"],
+    .VOzbGW_options [class$="_themeCube"],
+    .VOzbGW_options .dshbg-row,
+    .VOzbGW_options .dshbg-btn {
+      animation: dsh-rowpulse 1.2s steps(2, end) infinite;
+    }
+    @keyframes dsh-rowpulse { 50% { opacity: 0.999; } }
   `;
   win.webContents.on('did-finish-load', () => {
-    win.webContents.insertCSS(SETTINGS_COMPACT_CSS).catch(() => {});
-    correctSizeOnce();
+    win.webContents.insertCSS(SETTINGS_PAINT_FIX_CSS).catch(() => {});
   });
 
   // External links -> system browser; navigation stays inside the DSH origin.
@@ -255,6 +279,23 @@ async function createWindow() {
   const dshUp = await probeDsh();
   lifeLog(`probeDsh -> ${dshUp}`);
   debugLog(`probeDsh -> ${dshUp}`);
+  if (dshUp) {
+    // The host is up, but it may be an orphan left by a previous run of THIS
+    // app (e.g. after a crash). If our pid marker matches the current port
+    // listener, adopt it so quitting the app also stops the host. A host the
+    // user started themselves (no matching marker) is left alone.
+    const marked = readHostPid();
+    if (marked !== null) {
+      const listener = await listenerOnDshPort();
+      if (listener !== null && listener === marked) {
+        hostProc = { pid: marked };
+        hostSpawnedByUs = true;
+        lifeLog(`adopting app-spawned host pid ${marked} (will clean up on quit)`);
+      } else {
+        clearHostPid(); // stale marker; the host was started by someone else
+      }
+    }
+  }
   if (!dshUp) {
     const host = new URL(DSH_URL).hostname;
     const isLoopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
@@ -271,6 +312,12 @@ async function createWindow() {
     const started = await waitForDsh();
     lifeLog(`waitForDsh -> ${started}`);
     debugLog(`waitForDsh -> ${started}`);
+    if (started) {
+      // Refresh the marker with the actual port listener (a descendant of the
+      // cmd wrapper) so a later instance can adopt it by matching the pid.
+      const lp = await listenerOnDshPort();
+      if (lp !== null) { writeHostPid(lp); lifeLog(`host listener pid ${lp} marked`); }
+    }
     if (!started) {
       dialog.showErrorBox(
         'Deepseek Harness 启动失败',
