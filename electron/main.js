@@ -183,11 +183,9 @@ async function waitForDsh(timeoutMs = HOST_START_TIMEOUT_MS) {
  *     orphaned trees whose cmd wrapper died early.
  * Every step is bounded by a timeout so this can never hang the quit.
  */
-function killHostTree() {
-  if (!hostProc || !hostSpawnedByUs) return Promise.resolve();
-  lifeLog('killing spawned host (tree + port)');
-  const port = new URL(DSH_URL).port || '80';
-  const taskkill = (pid) => new Promise((resolve) => {
+/** taskkill one process tree, never hanging on a stuck kill. */
+function taskkillTree(pid) {
+  return new Promise((resolve) => {
     let done = false;
     const finish = () => { if (!done) { done = true; resolve(); } };
     try {
@@ -199,12 +197,12 @@ function killHostTree() {
       setTimeout(finish, 3000); // never wait forever on taskkill
     } catch { finish(); }
   });
+}
 
-  // 1) the spawn tree
-  const treeKill = taskkill(hostProc.pid);
-
-  // 2) whatever listens on the DSH port
-  const portKill = new Promise((resolve) => {
+/** Kill whatever LISTENs on the DSH port (catches orphaned spawn trees). */
+function killPortListener() {
+  const port = new URL(DSH_URL).port || '80';
+  return new Promise((resolve) => {
     let done = false;
     const finish = () => { if (!done) { done = true; resolve(); } };
     try {
@@ -219,15 +217,19 @@ function killHostTree() {
           out.split(/\r?\n/).map((l) => l.match(re)?.[1]).filter(Boolean),
         )];
         lifeLog(`port ${port} listeners: ${pids.join(',') || 'none'}`);
-        await Promise.all(pids.map(taskkill));
+        await Promise.all(pids.map(taskkillTree));
         finish();
       });
       netstat.on('error', finish);
       setTimeout(finish, 3000); // netstat must not hang us either
     } catch { finish(); }
   });
+}
 
-  return Promise.all([treeKill, portKill]).then(() => {
+function killHostTree() {
+  if (!hostProc || !hostSpawnedByUs) return Promise.resolve();
+  lifeLog('killing spawned host (tree + port)');
+  return Promise.all([taskkillTree(hostProc.pid), killPortListener()]).then(() => {
     hostProc = null;
     clearHostPid();
     lifeLog('host killed');
@@ -249,7 +251,105 @@ const SPLASH = `data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype htm
   <div class="title">Deepseek Harness</div>
   <div class="sub">正在启动本地服务…</div>
   <div class="dot"></div>
-</div></body></html>`)}`;
+  <div id="dsh-wd" data-t="0" hidden></div>
+</div>
+<script>
+  var shown = Math.round(performance.now() / 1000);
+  var el = document.getElementById('dsh-wd');
+  el.dataset.t = String(shown);
+  setInterval(function () { el.dataset.t = String(shown + Math.round(performance.now() / 1000)); }, 1000);
+</script></body></html>`)}`;
+
+/** Build the recovery page HTML as a data URL (see {@link diagnosticPage}). */
+function diagnosticPage(message, paths) {
+  const body = `<!doctype html>
+<html><head><meta charset="utf-8"><title>Deepseek Harness</title><style>
+  html,body{height:100%;margin:0;background:#070b10;color:#e8eef4;
+    font-family:"Segoe UI",system-ui,sans-serif;display:flex;align-items:center;justify-content:center}
+  .box{width:640px;padding:28px 32px;border:1px solid #1d2a38;border-radius:14px;background:#0b1119}
+  .title{font-size:20px;font-weight:600;margin-bottom:14px}
+  .msg{font-size:14px;line-height:1.7;white-space:pre-wrap;color:#c8d6e4}
+  .kv{margin-top:16px;font-size:12px;line-height:1.9;color:#8fa3b8;word-break:break-all}
+  button{margin-top:20px;margin-right:10px;padding:8px 16px;font-size:13px;color:#e8eef4;
+    background:#132030;border:1px solid #24384c;border-radius:8px;cursor:pointer}
+  button:hover{background:#18293c}
+  .hint{margin-top:16px;font-size:12px;color:#6f8296;line-height:1.7}
+</style></head><body><div class="box">
+  <div class="title">界面没能加载出来</div>
+  <div class="msg">${escapeHtml(message)}</div>
+  <div class="kv">
+    地址：${escapeHtml(paths.url)}<br>
+    应用日志：${escapeHtml(paths.logPath)}<br>
+    宿主日志：${escapeHtml(paths.hostLogPath)}
+  </div>
+  <button id="retry">重试</button>
+  <button id="log">打开日志所在目录</button>
+  <div class="hint">若反复失败：先确认 3080 端口上是不是还有别的程序（例如命令行启动的 <code>dsh web</code>）占着，关掉它再点重试。</div>
+</div>
+<script>
+  document.getElementById('retry').addEventListener('click', function () {
+    location.href = ${JSON.stringify(new URL(DSH_URL).origin + '/')};
+  });
+  document.getElementById('log').addEventListener('click', function () {
+    location.href = 'dsh-reveal-log:' + encodeURIComponent(${JSON.stringify(paths.logPath)});
+  });
+</script></body></html>`;
+  return `data:text/html;charset=utf-8,${encodeURIComponent(body)}`;
+}
+
+/** Minimal HTML escape for text interpolated into the recovery page. */
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
+}
+
+/**
+ * Cover a real page that has loaded but not mounted yet with a small loading
+ * card. The DSH shell answers in well under a second while its client bundles
+ * need seconds to build the UI; without this the window shows the window's own
+ * dark background for that whole gap, which reads as a black/hung app.
+ * @returns the id used by {@link dismissSkeleton}.
+ */
+const SKELETON_ID = 'dsh-skeleton';
+
+function installSkeleton() {
+  const script = `(() => {
+    if (document.getElementById(${JSON.stringify(SKELETON_ID)})) return;
+    const el = document.createElement('div');
+    el.id = ${JSON.stringify(SKELETON_ID)};
+    el.innerHTML = '<div class="dsh-sk-card"><div class="dsh-sk-title">Deepseek Harness</div>' +
+      '<div class="dsh-sk-sub">界面加载中…</div><div class="dsh-sk-dot"></div></div>';
+    const css = document.createElement('style');
+    css.textContent = \`
+      #${SKELETON_ID}{position:fixed;inset:0;z-index:2147483647;background:#070b10;color:#e8eef4;
+        display:flex;align-items:center;justify-content:center;font-family:"Segoe UI",system-ui,sans-serif;
+        transition:opacity .25s ease}
+      #${SKELETON_ID} .dsh-sk-card{text-align:center}
+      #${SKELETON_ID} .dsh-sk-title{font-size:22px;font-weight:600;letter-spacing:.5px}
+      #${SKELETON_ID} .dsh-sk-sub{margin-top:12px;font-size:13px;color:#8fa3b8}
+      #${SKELETON_ID} .dsh-sk-dot{display:inline-block;width:6px;height:6px;border-radius:50%;
+        background:#5ff0e8;margin-top:18px;animation:dsh-sk-pulse 1.2s ease-in-out infinite}
+      @keyframes dsh-sk-pulse{0%,100%{opacity:.25}50%{opacity:1}}\`;
+    document.head.appendChild(css);
+    document.documentElement.appendChild(el);
+  })()`;
+  return win.webContents.executeJavaScript(script, true).catch(() => {});
+}
+
+/** Fade the loading card out once the real UI has mounted. */
+function dismissSkeleton() {
+  const script = `(() => {
+    const el = document.getElementById(${JSON.stringify(SKELETON_ID)});
+    if (!el) return;
+    el.dataset.done = '1';
+    el.style.opacity = '0';
+    setTimeout(() => el.remove(), 400);
+  })()`;
+  return win.webContents.executeJavaScript(script, true).catch(() => {});
+}
 
 async function createWindow() {
   debugLog('createWindow start');
@@ -339,15 +439,222 @@ async function createWindow() {
     return { action: 'deny' };
   });
   win.webContents.on('will-navigate', (e, url) => {
+    // The recovery page's "open the log folder" button: hand the folder to
+    // Explorer instead of navigating the window anywhere.
+    if (url.startsWith('dsh-reveal-log:')) {
+      e.preventDefault();
+      try {
+        shell.showItemInFolder(decodeURIComponent(url.slice('dsh-reveal-log:'.length)));
+      } catch { /* noop */ }
+      return;
+    }
     let target;
     try { target = new URL(url); } catch { e.preventDefault(); return; }
-    if (target.origin !== new URL(DSH_URL).origin) e.preventDefault();
+    if (target.origin !== new URL(DSH_URL).origin) { e.preventDefault(); return; }
+    // Recovery-page retry for a failure a plain reload cannot fix: drop the
+    // host that refuses us (taskkill by port), start our own, then load it.
+    if (retryNeedsOwnHost) {
+      e.preventDefault();
+      retryNeedsOwnHost = false;
+      lifeLog('retry: restarting the local host');
+      // The one-shot guard keeps a second retry click from starting a second
+      // restart while this one is still running.
+      if (!restartInFlight) {
+        restartInFlight = true;
+        void (async () => {
+          try {
+            if (hostProc && hostSpawnedByUs) await killHostTree();
+            else await killPortListener();
+            startDshHost();
+            const probe = await waitForDsh();
+            lifeLog(`retry: waitForDsh -> ${probe.up}`);
+            if (!probe.up) {
+              await loadErrorPage('本地 DSH 服务重启失败，请查看宿主日志。', { restartHost: true });
+              return;
+            }
+            const lp = await listenerOnDshPort();
+            if (lp !== null) writeHostPid(lp);
+            const tokenUrl = lastTokenUrlFromLog();
+            await win.loadURL(tokenUrl ?? DSH_URL);
+          } catch (err) {
+            lifeLog(`retry failed: ${err?.message ?? err}`);
+            await loadErrorPage(`重启本地服务时出错：${err?.message ?? err}`, { restartHost: true });
+          } finally {
+            restartInFlight = false;
+          }
+        })();
+      }
+    }
   });
   win.on('closed', () => { win = null; });
 
-  // Splash while we make sure the DSH host is (or becomes) reachable.
+  // ── failure visibility ──────────────────────────────────────────────────
+  // Before this block existed a failed load was invisible: the window simply
+  // stayed on the dark splash/blank page, the app.log said "official UI
+  // loaded", and there was nothing to debug. Every load failure and renderer
+  // crash is now logged, and a page that never becomes interactive shows a
+  // recovery page with the real reason instead of a silent black window.
+  let lastFailures = 0;
+  const recoveryOffered = { value: false };
+  // Set by the load-event handler below and cleared/used by the startup probe:
+  // true once the "UI is loading" cover is on screen, with the moment it went up.
+  let skeletonShown = false;
+  let blankSince = null;
+  // True when the recovery page on screen came from a failure a plain reload
+  // cannot fix (a token-gated host belonging to another program), so its retry
+  // must restart the local host first.
+  let retryNeedsOwnHost = false;
+  let restartInFlight = false;
+  // True while we are knowingly waiting on the host we are starting (the first
+  // `npx` run can take a minute): the splash watchdog stands down meanwhile.
+  let expectSlowStart = false;
+
+  const loadErrorPage = async (message, options = {}) => {
+    retryNeedsOwnHost = options.restartHost === true;
+    try {
+      await win.loadURL(
+        diagnosticPage(message, {
+          logPath: `${app.getPath('userData')}\\app.log`,
+          hostLogPath: `${app.getPath('userData')}\\dsh-host.log`,
+          url: DSH_URL,
+        }),
+      );
+      win.show();
+    } catch (err) {
+      lifeLog(`recovery page failed: ${err?.message ?? err}`);
+    }
+  };
+
+  win.webContents.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
+    if (!isMainFrame) return;
+    lifeLog(`did-fail-load ${code} ${desc} url=${url}`);
+    lastFailures += 1;
+    if (lastFailures >= 3 && !recoveryOffered.value) {
+      recoveryOffered.value = true;
+      loadErrorPage(`无法加载 ${DSH_URL}（连续 ${lastFailures} 次失败）\n${code} ${desc}`);
+    }
+  });
+  win.webContents.on('did-finish-load', () => { lastFailures = 0; });
+  // The client shell finishes loading long before its bundles have mounted the
+  // UI, and that gap shows the window's own dark background. Cover it from the
+  // load event itself (no polling involved) and let the probes below dismiss
+  // it; the deadline guarantees it cannot outlive a slow-but-working UI.
+  win.webContents.on('did-stop-loading', () => {
+    if (recoveryOffered.value || watchdogDone) return;
+    if (skeletonShown) return;
+    skeletonShown = true;
+    blankSince = Date.now();
+    installSkeleton().catch(() => {});
+    const deadline = setTimeout(() => {
+      if (watchdogDone) return;
+      watchdogDone = true;
+      clearTimeout(watchdogTimer);
+      lifeLog('skeleton fallback deadline reached (~20s); uncovering the page');
+      dismissSkeleton();
+      win.show();
+      win.moveTop();
+      win.focus();
+    }, 20000);
+    deadline.unref?.();
+  });
+  // The renderer's own console output is the only place a stuck client-side
+  // bootstrap (modules that throw, a socket that never opens) shows up.
+  win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+    const text = String(message ?? '').slice(0, 400);
+    if (!text) return;
+    debugLog(`renderer[${level}] ${text}${sourceId ? ` (${sourceId}:${line})` : ''}`);
+    if (level >= 2) lifeLog(`renderer[${level}] ${text}`);
+  });
+  win.webContents.on('render-process-gone', (_e, details) => {
+    lifeLog(`render-process-gone reason=${details?.reason} exitCode=${details?.exitCode}`);
+    if (!recoveryOffered.value) {
+      recoveryOffered.value = true;
+      loadErrorPage(`界面进程异常退出（${details?.reason ?? 'unknown'}）`);
+    }
+  });
+  win.on('unresponsive', () => lifeLog('window unresponsive'));
+
+  // Splash while we make sure the DSH host is (or becomes) reachable, then a
+  // second wait for the real UI: the shell page finishes loading long before
+  // the client bundles have mounted anything, and that gap is what a user sees
+  // as a black window. The skeleton covers it; the heartbeat also gives a page
+  // that never mounts a deadline instead of leaving it silent.
   await win.loadURL(SPLASH);
   debugLog('splash loaded');
+
+  // One page probe per second drives both waits: `splash` is the splash page's
+  // own counter (`{splash: seconds}`), `hidden` marks a mounted real page, and
+  // `nodes` counts its elements.
+  const PAGE_STATE_JS = `(() => {
+    const wd = document.getElementById('dsh-wd');
+    if (wd) return { splash: Number(wd.dataset.t) };
+    const sk = document.getElementById('dsh-skeleton');
+    if (sk && sk.dataset.done === '1') return { hidden: true };
+    return { nodes: document.body ? document.body.querySelectorAll('*').length : 0 };
+  })()`;
+
+  let watchdogDone = false;
+  let watchdogTimer = null;
+  let lastProbeError = null;
+  const heartbeat = () => {
+    if (watchdogDone || !win || win.isDestroyed()) return;
+    watchdogTimer = setTimeout(heartbeat, 1000);
+    win.webContents
+      .executeJavaScript(PAGE_STATE_JS, true)
+      .then((state) => {
+        if (watchdogDone) return;
+        if (state && typeof state.splash === 'number') {
+          // While the host is starting the splash is legitimately on screen for
+          // a while (the first run may download the dsh package for a minute),
+          // so only a splash that outstays "we are waiting for the host" is a
+          // hang.
+          if (!expectSlowStart && state.splash > 15) {
+            watchdogDone = true;
+            clearTimeout(watchdogTimer);
+            lifeLog(`startup watchdog fired after ~${state.splash}s on the splash page`);
+            loadErrorPage(`本地服务已就绪，但界面在约 ${state.splash} 秒内没有渲染出内容`);
+          }
+          return;
+        }
+        if (!skeletonShown) {
+          skeletonShown = true;
+          blankSince = Date.now();
+          installSkeleton();
+          return;
+        }
+        if (state && state.hidden) { watchdogDone = true; clearTimeout(watchdogTimer); return; }
+        const nodes = state?.nodes ?? 0;
+        if (nodes > 120) {
+          const waited = ((Date.now() - blankSince) / 1000).toFixed(1);
+          lifeLog(`UI mounted after ~${waited}s (${nodes} nodes); skeleton removed`);
+          dismissSkeleton();
+          watchdogDone = true;
+          clearTimeout(watchdogTimer);
+          // The window was shown while still blank; make sure it is on top now
+          // that there is something to look at.
+          win.show();
+          win.moveTop();
+          win.focus();
+          return;
+        }
+        if ((Date.now() - blankSince) / 1000 > 45) {
+          watchdogDone = true;
+          clearTimeout(watchdogTimer);
+          lifeLog(`UI never mounted (~45s, ${nodes} nodes)`);
+          loadErrorPage('本地服务已响应，但界面在约 45 秒内没有挂载出任何内容。');
+        }
+      })
+      .catch((err) => {
+        // A probe that never resolves is exactly how this loop went quiet once:
+        // say so instead of looping in silence.
+        const message = String(err?.message ?? err);
+        if (message !== lastProbeError) {
+          lastProbeError = message;
+          lifeLog(`page probe failed: ${message}`);
+        }
+      });
+  };
+  heartbeat();
 
   let probe = await probeDsh();
   lifeLog(`probeDsh -> ${probe.up}${probe.authRequired ? ' (auth required)' : ''}`);
@@ -374,15 +681,15 @@ async function createWindow() {
     const isLoopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
     if (!isLoopback) {
       debugLog('non-loopback DSH_URL, giving up');
-      dialog.showErrorBox(
-        'Deepseek Harness 无法连接',
-        `无法连接 DSH 服务（${DSH_URL}）。\n\n请确认服务已启动，或检查 DSH_URL 环境变量。`,
+      await loadErrorPage(
+        `无法连接 DSH 服务：${DSH_URL}\n请确认服务已启动，或检查 DSH_URL 环境变量。`,
       );
-      app.quit();
       return;
     }
     startDshHost();
+    expectSlowStart = true;
     probe = await waitForDsh();
+    expectSlowStart = false;
     lifeLog(`waitForDsh -> ${probe.up}${probe.authRequired ? ' (auth required)' : ''}`);
     debugLog(`waitForDsh -> ${JSON.stringify(probe)}`);
     if (probe.up) {
@@ -392,14 +699,22 @@ async function createWindow() {
       if (lp !== null) { writeHostPid(lp); lifeLog(`host listener pid ${lp} marked`); }
     }
     if (!probe.up) {
-      dialog.showErrorBox(
-        'Deepseek Harness 启动失败',
-        `本地 DSH 服务在 ${Math.round(HOST_START_TIMEOUT_MS / 1000)} 秒内未能启动。\n\n` +
-        `请确认已安装 Node.js 且能访问网络（首次启动需下载 dsh 包，约 1-2 分钟）。\n` +
-        `日志：${app.getPath('userData')}\\dsh-host.log`,
+      await loadErrorPage(
+        `本地 DSH 服务在 ${Math.round(HOST_START_TIMEOUT_MS / 1000)} 秒内未能启动。\n` +
+        '请确认已安装 Node.js 且能访问网络（首次启动需下载 dsh 包，约 1-2 分钟）。',
       );
-      app.quit();
       return;
+    }
+  } else if (hostSpawnedByUs) {
+    // probe.up was false above, so nothing listened a moment ago; if a listener
+    // shows up now it is a dying orphan of our own previous run still holding
+    // the port. Clear it before the window tries to load, otherwise the page
+    // can end up talking to a half-dead host.
+    const stuck = await listenerOnDshPort();
+    if (stuck !== null) {
+      lifeLog(`orphan listener pid ${stuck} still on the port; clearing it before opening the UI`);
+      await taskkillTree(stuck);
+      await sleep(800);
     }
   }
 
@@ -412,7 +727,6 @@ async function createWindow() {
   // host and let this app run its own.
   const hostIsOurs = hostSpawnedByUs;
 
-  /** True when the window is showing the host's 401 "authentication required" page. */
   const showingAuthRequired = async () => {
     try {
       const text = await win.webContents.executeJavaScript(
@@ -448,12 +762,10 @@ async function createWindow() {
       }
     }
     if (!loaded) {
-      dialog.showErrorBox(
-        'Deepseek Harness 启动失败',
-        'DSH 服务已启动，但未能取得其访问令牌来打开界面。\n\n' +
-        `日志：${app.getPath('userData')}\\dsh-host.log`,
+      await loadErrorPage(
+        'DSH 服务已启动，但未能取得它的访问令牌来打开界面。\n' +
+        '通常是这一轮宿主启动异常；点「重试」会重启本地服务再试一次。',
       );
-      app.quit();
       return;
     }
     lifeLog('official UI loaded (authenticated)');
@@ -461,15 +773,17 @@ async function createWindow() {
   } else {
     // Foreign host: plain load passes only while our signed cookie is valid.
     await win.loadURL(DSH_URL);
-    lifeLog('official UI loaded');
+    lifeLog(`official UI loaded (foreign host, cookie ${(await showingAuthRequired()) ? 'invalid' : 'valid'})`);
     debugLog('official UI loaded');
     if (await showingAuthRequired()) {
-      dialog.showErrorBox(
-        'Deepseek Harness 无法连接',
-        'DSH 服务已由其他程序启动，且需要访问令牌（0.1.2+ 网页版的安全机制），本应用无法取得该令牌。\n\n' +
-        '请先关闭那个程序，再重新打开本应用，让应用自行启动 DSH 服务。',
+      // 0.1.2+ guards the UI with a per-process token we cannot read from a
+      // host we did not start. Offer the recovery page (its retry restarts our
+      // own host) rather than quitting into a black window.
+      await loadErrorPage(
+        '这个地址上的 DSH 服务是别的程序启动的，并且要求访问令牌，本应用取不到它。\n' +
+        '点「重试」会关掉那个宿主、由本应用自己拉起一个再打开界面；也可以先手动关掉那个程序。',
+        { restartHost: true },
       );
-      app.quit();
       return;
     }
   }

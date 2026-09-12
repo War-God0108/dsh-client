@@ -11,8 +11,8 @@
 **方式一：使用打包好的 exe（免 Node 环境）**
 
 ```
-dist\Deepseek Harness-Setup-0.5.0.exe       安装器（推荐，装到开始菜单/桌面快捷方式）
-dist\Deepseek Harness-Portable-0.5.0.exe    便携版（免安装，双击即用，适合放 U 盘）
+dist\Deepseek Harness-Setup-0.5.1.exe       安装器（推荐，装到开始菜单/桌面快捷方式）
+dist\Deepseek Harness-Portable-0.5.1.exe    便携版（免安装，双击即用，适合放 U 盘）
 ```
 
 > 需要本机已安装 Node.js 且能访问网络（首次自动拉起 DSH 时要下载 dsh 包，之后走缓存秒开）。如果 DSH 已在运行（比如你自己开的 `npx @deepseek-ai/dsh web`），桌面端直接复用，不会重复启动。
@@ -20,6 +20,13 @@ dist\Deepseek Harness-Portable-0.5.0.exe    便携版（免安装，双击即用
 > **0.4.8+（适配 DSH 0.1.2+ 访问令牌）**：DSH 0.1.2 起网页版带每进程随机令牌（URL `?token=…`），直接打开裸地址会看到 "dsh web authentication required"。桌面端会自动处理：应用自己拉起的宿主从 `dsh-host.log` 读取令牌完成一次登录换取 30 天 Cookie；由其他程序启动的宿主且无有效 Cookie 时会提示先关闭该程序再重开本应用。
 >
 > **0.5.0（不再弹出浏览器）**：`dsh web` 默认启动后会把界面交给系统默认浏览器（`openBrowser: true`），桌面端会因此多弹一个浏览器窗口。现在应用拉起宿主时固定加 `--no-open`，界面只出现在桌面窗口里；令牌仍然照常打印到 `dsh-host.log`，登录流程不受影响。想恢复"顺带打开浏览器"的旧行为，设 `DSH_OPEN_BROWSER=1` 即可。注意：自己手动跑 `npx @deepseek-ai/dsh web` 时仍会打开浏览器，那是 DSH 自身的行为，需要 `--no-open` 或在本机配置文件里关掉。
+>
+> **0.5.1（黑屏根治：加载骨架屏 + 失败可诊断）**：之前的"黑屏"来自一段真空期——DSH 的 shell 页面 `did-finish-load` 很早（不到 1 秒），而客户端 bundle 把它挂载成真正的界面还要几秒；这几秒里窗口只有自己的深色背景，看起来就是卡死/黑屏，日志却写着 "official UI loaded"。现在：
+>
+> - 真实界面挂载前，页面会被一层「界面加载中…」骨架屏盖住，挂载完成（DOM 节点数超过阈值）后自动淡出，日志记录 `UI mounted after ~Xs`；
+> - 界面挂载后会把窗口重新提到最前（此前窗口可能一直压在浏览器后面，只露出深色背景）；
+> - 加载失败（`did-fail-load`）、渲染进程崩溃（`render-process-gone`）、渲染器 console 报错都会逐条写进 `app.log`；
+> - 骨架屏超过 45 秒没等到挂载、或过渡页超过 15 秒（且不是在等宿主启动）会显示**恢复页**：写明失败原因、两个日志路径，并提供「重试」和「打开日志目录」；若 3080 被别的程序占着且它要求访问令牌，重试会自动结束那个宿主、由应用自己重新拉起一个。
 
 **方式二：源码运行**
 
@@ -97,9 +104,10 @@ node test-electron-runtime.mjs  # 内嵌代理冒烟（旧代理栈，需 DSH �
 node test-ws.mjs                # WS 下行代理冒烟（旧代理栈）
 node test-e2e.mjs               # 全链路（旧代理栈，需 DSH 运行，会创建临时会话）
 node test-dom-jsdom.mjs         # DOM 集成（旧自定义界面）
+python smoke-spawn-test.py      # 桌面端冒烟：验证"自己拉起宿主 -> 窗口正常渲染"这条路径
 ```
 
-当前桌面应用本身的验证方式是启动打包产物冒烟（见 README 变更历史）。
+`smoke-spawn-test.py` 会用 `DSH_URL=http://127.0.0.1:3099` 启动打包产物，确认它确实拉起了宿主、界面挂载完成（日志出现 `UI mounted after ~Xs`）、窗口渲染出真实界面（按窗口区域抓屏做像素采样，不是只看日志）、没有触发看门狗或恢复页，并在结束时把拉起的进程全部清掉。运行前需先关闭已打开的桌面端（单实例锁）。
 
 ## 目录
 
