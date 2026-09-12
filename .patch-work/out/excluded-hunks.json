@@ -1,0 +1,35 @@
+{
+  "targets": [
+    {
+      "pkg": "dsh-api-remotes",
+      "rel": "lib/index.js",
+      "patches": []
+    },
+    {
+      "pkg": "dsh-host-apiproxy",
+      "rel": "lib/index.js",
+      "patches": [
+        {
+          "old": "\t\"web-search-deepseek\"",
+          "new": "\t\"web-bg\",\n\t\"web-search-deepseek\"",
+          "oldStart": 892
+        }
+      ]
+    },
+    {
+      "pkg": "dsh-client-runtime",
+      "rel": "lib/client.js",
+      "patches": []
+    },
+    {
+      "pkg": "dsh-client-connection",
+      "rel": "lib/client.js",
+      "patches": []
+    },
+    {
+      "pkg": "dsh-client-ui-workspace",
+      "rel": "lib/client.js",
+      "patches": []
+    }
+  ]
+}

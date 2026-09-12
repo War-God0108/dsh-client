@@ -15,12 +15,44 @@
 import { app, BrowserWindow, shell, dialog, session, screen } from 'electron';
 import { spawn } from 'node:child_process';
 import { openSync, appendFileSync, writeSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { applyToRoot, npxRoots } from './patch-delete-session.mjs';
+import { installPlugin } from './install-plugin.mjs';
 
 let win = null;
 let hostProc = null; // the DSH host child we spawned (if any)
 let hostSpawnedByUs = false;
 
 const DSH_URL = process.env.DSH_URL ?? 'http://127.0.0.1:3080';
+
+// DSH's web app hands the authenticated URL to the default browser on startup
+// (`openBrowser: true`). In this app the UI belongs in the Electron window, so
+// the host we spawn is started with `--no-open`: otherwise every launch pops a
+// second, browser copy of the same page. Set DSH_OPEN_BROWSER=1 to get the old
+// behaviour back. `printUrl` stays on either way, so the launch-token URL keeps
+// reaching dsh-host.log — exactly what the token handoff below reads.
+const OPEN_BROWSER = /^(1|true|yes|on)$/i.test(process.env.DSH_OPEN_BROWSER ?? '');
+
+// DSH 0.1.2+ guards its web UI with a per-process "launch token": `dsh web`
+// prints an authenticated URL (`.../?token=...`) at startup, the first visit
+// trades the token for a 30-day signed browser cookie, and later visits pass
+// on the cookie. The token never persists anywhere stable, so this app
+// re-reads it from the dsh-host.log of the host it spawned (or adopted); a
+// foreign host without a valid cookie must be closed so the app can start
+// its own host.
+const AUTH_REQUIRED_TEXT = 'dsh web authentication required';
+const TOKEN_URL_RE = /https?:\/\/\S+[?&]token=[A-Za-z0-9_-]+/g;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Last authenticated `dsh web` URL (`...?token=...`) written to the host log. */
+function lastTokenUrlFromLog() {
+  try {
+    const log = readFileSync(`${app.getPath('userData')}\\dsh-host.log`, 'utf8');
+    const matches = [...log.matchAll(TOKEN_URL_RE)];
+    return matches.length === 0 ? null : matches[matches.length - 1][0];
+  } catch {
+    return null;
+  }
+}
 
 // Records the PID of the DSH host that WE spawned, so a later instance can
 // adopt it (clean it up on quit) even though it did not spawn it itself.
@@ -84,16 +116,23 @@ lifeLog(`boot: v${app.getVersion()} DSH_URL=${DSH_URL}`);
 
 const HOST_START_TIMEOUT_MS = 120000; // first `npx` run may download the package
 
-/** True when the DSH host answers on the configured URL. */
+/**
+* Probe the DSH host.
+* @returns {up, authRequired} — `up` = any real HTTP answer (<500) means the
+* host is listening; `authRequired` = the host guards its UI (0.1.2+ answers
+* the bare root with 401 until a launch-token exchange or valid cookie).
+* Node's fetch carries no browser cookie jar, so a token-gated host always
+* reports authRequired here even when the window's own cookie would pass.
+*/
 async function probeDsh(timeoutMs = 1500) {
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), timeoutMs);
     const res = await fetch(DSH_URL, { signal: ctrl.signal });
     clearTimeout(t);
-    return res.status < 500; // any real HTTP answer means the host is up
+    return { up: res.status < 500, authRequired: res.status === 401 || res.status === 403 };
   } catch {
-    return false;
+    return { up: false, authRequired: false };
   }
 }
 
@@ -102,6 +141,7 @@ function startDshHost() {
   const u = new URL(DSH_URL);
   const args = ['/c', 'npx', '-y', '@deepseek-ai/dsh', 'web'];
   if (u.port && u.port !== '80') args.push('--port', u.port);
+  if (!OPEN_BROWSER) args.push('--no-open');
   let logFd;
   try {
     logFd = openSync(`${app.getPath('userData')}\\dsh-host.log`, 'a');
@@ -125,11 +165,13 @@ function startDshHost() {
 
 async function waitForDsh(timeoutMs = HOST_START_TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
+  let last = { up: false, authRequired: false };
   while (Date.now() < deadline) {
-    if (await probeDsh()) return true;
+    last = await probeDsh();
+    if (last.up) return last;
     await new Promise((r) => setTimeout(r, 1000));
   }
-  return false;
+  return last;
 }
 
 /**
@@ -212,6 +254,37 @@ const SPLASH = `data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype htm
 async function createWindow() {
   debugLog('createWindow start');
   lifeLog('createWindow');
+  // Deploy the "Delete session" (删除会话) Host plugin into the DSH profile
+  // BEFORE the host is probed or spawned. The deletion logic itself lives in
+  // that plugin (an ordinary user plugin under $DSH_HOME/profiles), so a DSH
+  // upgrade cannot take it away; the patch below only contributes the two
+  // things a plugin cannot reach — the sidebar menu item and the live Agent
+  // teardown hook. Both steps are idempotent.
+  try {
+    const report = installPlugin({ log: (message) => lifeLog(`session-delete plugin: ${message}`) });
+    for (const error of report.errors) lifeLog(`session-delete plugin error: ${error}`);
+    lifeLog(`session-delete plugin: deployed=${report.deployed} mounted=${report.mounted.length} already=${report.alreadyMounted.length}`);
+  } catch (err) {
+    lifeLog(`session-delete plugin deployment failed: ${err?.message ?? err}`);
+  }
+  // Apply the "Delete session" (删除会话) feature patch to the DSH host
+  // packages in the npm npx cache BEFORE the host is probed or spawned, so a
+  // package reinstall or cache clean cannot silently drop the feature. The
+  // patch is idempotent; if the host is already running (adopted), the change
+  // takes effect on its next boot.
+  try {
+    const patchRoots = npxRoots();
+    if (patchRoots.length === 0) {
+      lifeLog('delete-session patch: no DSH package root found (npx cache absent?)');
+    }
+    for (const root of patchRoots) {
+      const result = applyToRoot(root);
+      lifeLog(`delete-session patch under ${root}: ${result.changed} patched, ${result.skipped} up-to-date, ${result.failed} failed`);
+      debugLog(`delete-session patch under ${root}: ${JSON.stringify(result)}`);
+    }
+  } catch (err) {
+    lifeLog(`delete-session patch failed: ${err?.message ?? err}`);
+  }
   // Stay within the available work area. Electron's screen API and
   // BrowserWindow both report device-independent pixels (the renderer DPR is
   // already factored in), so no extra division is needed — dividing by
@@ -276,10 +349,10 @@ async function createWindow() {
   await win.loadURL(SPLASH);
   debugLog('splash loaded');
 
-  const dshUp = await probeDsh();
-  lifeLog(`probeDsh -> ${dshUp}`);
-  debugLog(`probeDsh -> ${dshUp}`);
-  if (dshUp) {
+  let probe = await probeDsh();
+  lifeLog(`probeDsh -> ${probe.up}${probe.authRequired ? ' (auth required)' : ''}`);
+  debugLog(`probeDsh -> ${JSON.stringify(probe)}`);
+  if (probe.up) {
     // The host is up, but it may be an orphan left by a previous run of THIS
     // app (e.g. after a crash). If our pid marker matches the current port
     // listener, adopt it so quitting the app also stops the host. A host the
@@ -296,7 +369,7 @@ async function createWindow() {
       }
     }
   }
-  if (!dshUp) {
+  if (!probe.up) {
     const host = new URL(DSH_URL).hostname;
     const isLoopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
     if (!isLoopback) {
@@ -309,16 +382,16 @@ async function createWindow() {
       return;
     }
     startDshHost();
-    const started = await waitForDsh();
-    lifeLog(`waitForDsh -> ${started}`);
-    debugLog(`waitForDsh -> ${started}`);
-    if (started) {
+    probe = await waitForDsh();
+    lifeLog(`waitForDsh -> ${probe.up}${probe.authRequired ? ' (auth required)' : ''}`);
+    debugLog(`waitForDsh -> ${JSON.stringify(probe)}`);
+    if (probe.up) {
       // Refresh the marker with the actual port listener (a descendant of the
       // cmd wrapper) so a later instance can adopt it by matching the pid.
       const lp = await listenerOnDshPort();
       if (lp !== null) { writeHostPid(lp); lifeLog(`host listener pid ${lp} marked`); }
     }
-    if (!started) {
+    if (!probe.up) {
       dialog.showErrorBox(
         'Deepseek Harness 启动失败',
         `本地 DSH 服务在 ${Math.round(HOST_START_TIMEOUT_MS / 1000)} 秒内未能启动。\n\n` +
@@ -330,9 +403,77 @@ async function createWindow() {
     }
   }
 
-  await win.loadURL(DSH_URL);
-  lifeLog('official UI loaded');
-  debugLog('official UI loaded');
+  // ── DSH 0.1.2+ launch-token flow ────────────────────────────────────────
+  // The host we spawned (or adopted from our own pid marker) writes its
+  // token URL into dsh-host.log at startup; loading that URL once trades the
+  // token for the 30-day signed cookie every later plain load uses. A host
+  // started by some OTHER program exposes no token to us: a plain load works
+  // only while our cookie is still valid, otherwise the user must close that
+  // host and let this app run its own.
+  const hostIsOurs = hostSpawnedByUs;
+
+  /** True when the window is showing the host's 401 "authentication required" page. */
+  const showingAuthRequired = async () => {
+    try {
+      const text = await win.webContents.executeJavaScript(
+        'document.body ? document.body.innerText.slice(0, 500) : ""',
+      );
+      return text.includes(AUTH_REQUIRED_TEXT);
+    } catch {
+      return false;
+    }
+  };
+
+  if (!probe.authRequired) {
+    await win.loadURL(DSH_URL);
+    lifeLog('official UI loaded');
+    debugLog('official UI loaded');
+  } else if (hostIsOurs) {
+    let tokenUrl = lastTokenUrlFromLog();
+    const deadline = Date.now() + 8000; // the fresh host may not have printed its line yet
+    while (tokenUrl === null && Date.now() < deadline) {
+      await sleep(500);
+      tokenUrl = lastTokenUrlFromLog();
+    }
+    let loaded = false;
+    if (tokenUrl !== null) {
+      for (let attempt = 0; attempt < 3 && !loaded; attempt++) {
+        await win.loadURL(tokenUrl);
+        if (!(await showingAuthRequired())) {
+          loaded = true;
+          break;
+        }
+        await sleep(1000); // the newest boot may not have printed its line yet
+        tokenUrl = lastTokenUrlFromLog();
+      }
+    }
+    if (!loaded) {
+      dialog.showErrorBox(
+        'Deepseek Harness 启动失败',
+        'DSH 服务已启动，但未能取得其访问令牌来打开界面。\n\n' +
+        `日志：${app.getPath('userData')}\\dsh-host.log`,
+      );
+      app.quit();
+      return;
+    }
+    lifeLog('official UI loaded (authenticated)');
+    debugLog('official UI loaded (authenticated)');
+  } else {
+    // Foreign host: plain load passes only while our signed cookie is valid.
+    await win.loadURL(DSH_URL);
+    lifeLog('official UI loaded');
+    debugLog('official UI loaded');
+    if (await showingAuthRequired()) {
+      dialog.showErrorBox(
+        'Deepseek Harness 无法连接',
+        'DSH 服务已由其他程序启动，且需要访问令牌（0.1.2+ 网页版的安全机制），本应用无法取得该令牌。\n\n' +
+        '请先关闭那个程序，再重新打开本应用，让应用自行启动 DSH 服务。',
+      );
+      app.quit();
+      return;
+    }
+  }
+
   // Bring the window to the foreground: launched from the background (or
   // double-clicked while another window has focus) it can otherwise stay
   // hidden behind the browser.
@@ -361,7 +502,7 @@ if (!gotLock) {
     }
   });
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     // 允许麦克风权限：语音输入插件需要 getUserMedia({ audio: true })
     session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
       callback(permission === 'media');
@@ -369,6 +510,18 @@ if (!gotLock) {
     session.defaultSession.setPermissionCheckHandler((_webContents, permission) => {
       return permission === 'media';
     });
+    // The DSH host serves client modules and the page shell with long-lived
+    // (immutable-style) cache headers. Our delete-session patch rewrites those
+    // module files before each launch, so a persisted HTTP cache would keep
+    // serving pre-patch copies to the window. Clear it every boot so freshly
+    // patched bundles always reach the renderer.
+    try {
+      await session.defaultSession.clearCache();
+      await session.defaultSession.clearCodeCaches({});
+    } catch (err) {
+      lifeLog(`cache clear failed: ${err?.message ?? err}`);
+      debugLog(`cache clear failed: ${err?.message ?? err}`);
+    }
     return createWindow();
   }).catch((err) => {
     dialog.showErrorBox('Deepseek Harness 启动失败', `无法启动窗口：\n${err.message}`);

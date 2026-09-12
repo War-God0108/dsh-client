@@ -1,29 +1,29 @@
 @echo off
 rem ============================================================
-rem  Deepseek Harness - 桌面客户端 启动脚本
-rem  双击本文件即可打开客户端窗口
+rem  Deepseek Harness - desktop client launcher
+rem  Double-click this file to open the client window.
+rem  (ASCII only on purpose: cmd.exe must not mis-parse this file)
 rem ============================================================
-chcp 65001 >nul
 cd /d "%~dp0"
 
 if not exist "node_modules\electron\dist\electron.exe" (
-  echo [Deepseek Harness] 首次运行，正在安装依赖（约 1-2 分钟）…
+  echo [Deepseek Harness] First run: installing dependencies - about 1 to 2 minutes...  
   call npm install
   if errorlevel 1 (
     echo.
-    echo [Deepseek Harness] 安装失败，请检查网络后重试。
+    echo [Deepseek Harness] Install failed. Check your network and retry.
     pause
     exit /b 1
   )
 )
 
-echo [Deepseek Harness] 正在启动桌面客户端…
-echo [Deepseek Harness] 请确保 DeepSeek Harness 正在 127.0.0.1:3080 运行
+echo [Deepseek Harness] Starting desktop client...
+echo [Deepseek Harness] The app starts its own DSH host when none is running.
 echo.
 
 node "node_modules\electron\cli.js" .
 if errorlevel 1 (
   echo.
-  echo [Deepseek Harness] 启动失败，或窗口已被关闭。
+  echo [Deepseek Harness] Start failed, or the window was closed.
   pause
 )

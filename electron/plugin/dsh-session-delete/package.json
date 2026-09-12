@@ -1,0 +1,13 @@
+{
+  "name": "dsh-session-delete",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DSH 删除会话插件：为侧边栏会话菜单提供真正的「删除会话」（停止活动 Agent、解绑工作区、删除持久化日志）",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "license": "MIT"
+}

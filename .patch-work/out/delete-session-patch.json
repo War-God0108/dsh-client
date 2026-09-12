@@ -1,0 +1,221 @@
+{
+  "version": 1,
+  "description": "Add \"Delete session\" (删除会话) to the sidebar session menu: session.remove RPC, client runtime remove(), connection API method, workspace UI menu item + confirm dialog. Applied by dsh-client before spawning the DSH host.",
+  "targets": [
+    {
+      "pkg": "dsh-api-remotes",
+      "rel": "lib/index.js",
+      "patches": [
+        {
+          "old": "\tconst fencedLiveAgent = (sessionId) => {",
+          "new": "\t/** Live resume handles by session id: the only teardown capability for resumed agents. */\n\tconst handles = /* @__PURE__ */ new Map();\n\tconst fencedLiveAgent = (sessionId) => {",
+          "oldStart": 100
+        },
+        {
+          "old": "\t\t\t\t\treturn (await ctx.agents.resume({\n\t\t\t\t\t\tresumeSessionId: sessionId,\n\t\t\t\t\t\t...options.agentOptions === void 0 ? {} : { agentOptions: options.agentOptions() },\n\t\t\t\t\t\t...setup === void 0 ? {} : { setup }\n\t\t\t\t\t})).agent;",
+          "new": "\t\t\t\t\tconst handle = await ctx.agents.resume({\n\t\t\t\t\t\tresumeSessionId: sessionId,\n\t\t\t\t\t\t...options.agentOptions === void 0 ? {} : { agentOptions: options.agentOptions() },\n\t\t\t\t\t\t...setup === void 0 ? {} : { setup }\n\t\t\t\t\t});\n\t\t\t\t\thandles.set(sessionId, handle);\n\t\t\t\t\treturn handle.agent;",
+          "oldStart": 121
+        },
+        {
+          "old": "\treturn agentFor;",
+          "new": "\t/**\n\t* Tear down a live agent this resolver resumed: `dispose()` stops the loop,\n\t* awaits its exit, unregisters the agent, removes its session from the store\n\t* and unwinds its scoped world. Agents created by other paths (the API\n\t* proxy's own create/fork) are not tracked here.\n\t* @param sessionId - the resumed session to tear down.\n\t* @returns whether a tracked handle was found and disposed.\n\t*/\n\tconst disposeAgent = async (sessionId) => {\n\t\tconst handle = handles.get(sessionId);\n\t\tif (handle === void 0) return false;\n\t\thandles.delete(sessionId);\n\t\tawait handle.dispose();\n\t\treturn true;\n\t};\n\treturn { agentFor, disposeAgent };",
+          "oldStart": 162
+        }
+      ]
+    },
+    {
+      "pkg": "dsh-host-apiproxy",
+      "rel": "lib/index.js",
+      "patches": [
+        {
+          "old": "import { mkdir, stat } from \"node:fs/promises\";",
+          "new": "import { mkdir, stat, unlink, rmdir } from \"node:fs/promises\";",
+          "oldStart": 1
+        },
+        {
+          "old": "const sessionCancelValueSchema = z$1.object({ accepted: z$1.literal(true) });\n//#endregion",
+          "new": "const sessionCancelValueSchema = z$1.object({ accepted: z$1.literal(true) });\n/** session.remove request payload. */\nconst sessionRemoveRequestSchema = z$1.object({ sessionId: sessionIdSchema });\n/** session.remove response value. */\nconst sessionRemoveValueSchema = z$1.object({ removed: z$1.literal(true) });\n//#endregion",
+          "oldStart": 664
+        },
+        {
+          "old": "\tconst agentFor = createApiRemoteAgentResolver(ctx, {",
+          "new": "\tconst { agentFor, disposeAgent } = createApiRemoteAgentResolver(ctx, {",
+          "oldStart": 1827
+        },
+        {
+          "old": "\t/** Resolve the Workspace inherited by a fork without making ordinary loose lineage grouped. */",
+          "new": "\t/** Agent handles this proxy created/resumed directly (the resolver tracks its own resumes). */\n\tconst agentHandles = /* @__PURE__ */ new Map();\n\t/**\n\t* Tear down a live agent for one session, trying the resolver's resumed\n\t* handles first, then this proxy's own created/forked handles.\n\t* @param sessionId - the live session to tear down.\n\t* @returns whether a live agent was found and disposed.\n\t*/\n\tasync function disposeLiveAgent(sessionId) {\n\t\tconst live = ctx.agents.get(sessionId);\n\t\tif (live === void 0) return false;\n\t\tlet disposed = false;\n\t\ttry {\n\t\t\tdisposed = await disposeAgent(sessionId);\n\t\t} catch (error) {\n\t\t\tconsole.warn(`session remove: resolver dispose failed for \"${sessionId}\":`, error);\n\t\t}\n\t\tif (!disposed) {\n\t\t\tconst handle = agentHandles.get(sessionId);\n\t\t\tif (handle !== void 0) {\n\t\t\t\tagentHandles.delete(sessionId);\n\t\t\t\tawait handle.dispose();\n\t\t\t\tdisposed = true;\n\t\t\t}\n\t\t}\n\t\treturn disposed;\n\t}\n\t/**\n\t* Remove one session's durable artifacts from the persistence backend.\n\t* @param header - the session header naming its artifact.\n\t* @returns whether any artifact was removed.\n\t*/\n\tasync function removePersistedSession(header) {\n\t\tconst persistence = ctx.get(\"sessionPersistence\");\n\t\tif (persistence === void 0) return false;\n\t\tconst location = persistence.locate(header);\n\t\tif (location === void 0) return false;\n\t\tlet removed = false;\n\t\ttry {\n\t\t\tawait unlink(location.path);\n\t\t\tremoved = true;\n\t\t} catch (error) {\n\t\t\tif (error?.code !== \"ENOENT\") throw error;\n\t\t}\n\t\ttry {\n\t\t\tawait rmdir(dirname(location.path));\n\t\t} catch (error) {\n\t\t\t/* v8 ignore next 3 -- an empty parent is best-effort cleanup; a non-empty\n\t\t\tdirectory or a missing parent must not fail the deletion. */\n\t\t\tif (error?.code !== \"ENOENT\" && error?.code !== \"ENOTEMPTY\" && error?.code !== \"EPERM\") throw error;\n\t\t}\n\t\treturn removed;\n\t}\n\t/** Resolve the Workspace inherited by a fork without making ordinary loose lineage grouped. */",
+          "oldStart": 2021
+        },
+        {
+          "old": "\t\t\t\t\treturn (await ctx.agents.resume({\n\t\t\t\t\t\tresumeSessionId: sessionId,\n\t\t\t\t\t\tagentOptions: agentOptions(),\n\t\t\t\t\t\tsetup: (await composeAgent(storedPreset)).setup\n\t\t\t\t\t})).agent;",
+          "new": "\t\t\t\t\tconst storedHandle = await ctx.agents.resume({\n\t\t\t\t\t\tresumeSessionId: sessionId,\n\t\t\t\t\t\tagentOptions: agentOptions(),\n\t\t\t\t\t\tsetup: (await composeAgent(storedPreset)).setup\n\t\t\t\t\t});\n\t\t\t\t\tagentHandles.set(sessionId, storedHandle);\n\t\t\t\t\treturn storedHandle.agent;",
+          "oldStart": 2147
+        },
+        {
+          "old": "\t\t\t\treturn (await ctx.agents.create({",
+          "new": "\t\t\t\tconst createdHandle = await ctx.agents.create({",
+          "oldStart": 2159
+        },
+        {
+          "old": "\t\t\t\t\tsetup: composition.setup\n\t\t\t\t})).agent;",
+          "new": "\t\t\t\t\tsetup: composition.setup\n\t\t\t\t});\n\t\t\t\tagentHandles.set(sessionId, createdHandle);\n\t\t\t\treturn createdHandle.agent;",
+          "oldStart": 2167
+        },
+        {
+          "old": "\t\t\t\t\tawait ctx.agents.create({",
+          "new": "\t\t\t\t\tconst forkHandle = await ctx.agents.create({",
+          "oldStart": 2786
+        },
+        {
+          "old": "\t\t\t\t\t\tsetup: forkComposition.setup\n\t\t\t\t\t});\n\t\t\t\t} catch (error) {",
+          "new": "\t\t\t\t\t\tsetup: forkComposition.setup\n\t\t\t\t\t});\n\t\t\t\t\tagentHandles.set(childId, forkHandle);\n\t\t\t\t} catch (error) {",
+          "oldStart": 2798
+        },
+        {
+          "old": "\t\t\t\tagent.cancel({ kind: \"user\" }, { keepInbox: true });\n\t\t\t\treturn Promise.resolve(ok(request, { accepted: true }));\n\t\t\t}",
+          "new": "\t\t\t\tagent.cancel({ kind: \"user\" }, { keepInbox: true });\n\t\t\t\treturn Promise.resolve(ok(request, { accepted: true }));\n\t\t\t},\n\t\t\tasync remove(request) {\n\t\t\t\tconst { sessionId } = request.payload;\n\t\t\t\tlet state;\n\t\t\t\ttry {\n\t\t\t\t\tstate = await readSessionState(sessionId);\n\t\t\t\t} catch (error) {\n\t\t\t\t\tif (error instanceof ApiRemoteSessionNotFound) return err(request, {\n\t\t\t\t\t\tcode: \"session-not-found\",\n\t\t\t\t\t\tmessage: error.message,\n\t\t\t\t\t\tdetails: { sessionId }\n\t\t\t\t\t});\n\t\t\t\t\treturn err(request, {\n\t\t\t\t\t\tcode: \"internal\",\n\t\t\t\t\t\tmessage: `failed to resolve session \"${sessionId}\" for removal: ${String(error)}`,\n\t\t\t\t\t\tdetails: {}\n\t\t\t\t\t});\n\t\t\t\t}\n\t\t\t\tconst liveAgent = ctx.agents.get(sessionId);\n\t\t\t\tif (hasSubagentOwner(state, liveAgent)) return err(request, subagentOwnershipError(sessionId));\n\t\t\t\tif (liveAgent !== void 0) {\n\t\t\t\t\ttry {\n\t\t\t\t\t\t/* Flush buffered events FIRST: the coordinator's write-behind\n\t\t\t\t\t\tcould otherwise materialize the artifact after our unlink and\n\t\t\t\t\t\tresurrect a \"deleted\" session on the next listing. */\n\t\t\t\t\t\tconst liveSession = ctx.sessions.get(sessionId);\n\t\t\t\t\t\tif (liveSession !== void 0) await ctx.sessions.flush(liveSession);\n\t\t\t\t\t\tawait disposeLiveAgent(sessionId);\n\t\t\t\t\t} catch (error) {\n\t\t\t\t\t\treturn err(request, {\n\t\t\t\t\t\t\tcode: \"internal\",\n\t\t\t\t\t\t\tmessage: `failed to stop session \"${sessionId}\" before removal: ${String(error)}`,\n\t\t\t\t\t\t\tdetails: {}\n\t\t\t\t\t\t});\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t\ttry {\n\t\t\t\t\tfor (const workspace of ctx.workspaceRegistry.list()) {\n\t\t\t\t\t\tif (!workspace.sessionIds.includes(sessionId)) continue;\n\t\t\t\t\t\ttry {\n\t\t\t\t\t\t\tawait workspace.detachSession(sessionId);\n\t\t\t\t\t\t} catch (error) {\n\t\t\t\t\t\t\tconsole.warn(`session remove: detach from workspace \"${workspace.id}\" rejected:`, error);\n\t\t\t\t\t\t}\n\t\t\t\t\t}\n\t\t\t\t\tconst removed = await removePersistedSession(state.header);\n\t\t\t\t\tif (liveAgent === void 0 && removed) broadcast({\n\t\t\t\t\t\ttype: \"host/session-removed\",\n\t\t\t\t\t\tsessionId\n\t\t\t\t\t});\n\t\t\t\t} catch (error) {\n\t\t\t\t\treturn err(request, {\n\t\t\t\t\t\tcode: \"internal\",\n\t\t\t\t\t\tmessage: `failed to remove session \"${sessionId}\": ${String(error)}`,\n\t\t\t\t\t\tdetails: {}\n\t\t\t\t\t});\n\t\t\t\t}\n\t\t\t\treturn ok(request, { removed: true });\n\t\t\t}",
+          "oldStart": 2958
+        },
+        {
+          "old": "\t\"subagent.list\": {",
+          "new": "\t\"session.remove\": {\n\t\tschema: sessionRemoveRequestSchema,\n\t\tinvoke: (api, r) => api.sessions.remove(r)\n\t},\n\t\"subagent.list\": {",
+          "oldStart": 4715
+        },
+        {
+          "old": "\t\"subagent.list\": subagentListValueSchema,",
+          "new": "\t\"session.remove\": sessionRemoveValueSchema,\n\t\"subagent.list\": subagentListValueSchema,",
+          "oldStart": 5251
+        },
+        {
+          "old": "\t\tcancel: (payload, signal) => this.callUnary(\"session.cancel\", payload, signal)",
+          "new": "\t\tcancel: (payload, signal) => this.callUnary(\"session.cancel\", payload, signal),\n\t\tremove: (payload, signal) => this.callUnary(\"session.remove\", payload, signal)",
+          "oldStart": 5462
+        }
+      ]
+    },
+    {
+      "pkg": "dsh-client-runtime",
+      "rel": "lib/client.js",
+      "patches": [
+        {
+          "old": "\t\t\t* Contract session.create; on success merge into summaries immediately (no",
+          "new": "\t\t\t* Delete a session on the host: stops its live agent (if any), removes\n\t\t\t* its persisted log, and drops it from every workspace account. Applies\n\t\t\t* the list removal locally, moves the selection away when the removed\n\t\t\t* session was current, and re-pulls the baseline so cold deletions\n\t\t\t* disappear from the list too.\n\t\t\t* @param sessionId - the session to remove.\n\t\t\t* @throws when the host rejects the removal.\n\t\t\t*/\n\t\t\tasync removeSession(sessionId) {\n\t\t\t\tconst { result } = await this.api.sessions.remove({ sessionId });\n\t\t\t\tif (!result.ok) throw new Error(result.error.message);\n\t\t\t\tthis.recordMutation({ kind: \"remove\", sessionId });\n\t\t\t\tif (this.selected === sessionId) {\n\t\t\t\t\tconst next = this.summaries[0];\n\t\t\t\t\tif (next !== void 0) this.select(next.sessionId);\n\t\t\t\t\telse this.clearSelection();\n\t\t\t\t}\n\t\t\t\tthis.sessions.get(sessionId)?.handleRemoved();\n\t\t\t\tawait this.refreshList();\n\t\t\t}\n\t\t\t/**\n\t\t\t* Contract session.create; on success merge into summaries immediately (no",
+          "oldStart": 8142
+        },
+        {
+          "old": "\t\t\t* Search the Host's visible message-content index. Results stay",
+          "new": "\t\t\t* Delete a session on the host and drop it from the list. See\n\t\t\t* {@link SessionManager.removeSession} for the exact lifecycle.\n\t\t\t* @param sessionId - the session to remove.\n\t\t\t* @throws when the host rejects the removal.\n\t\t\t*/\n\t\t\tremove(sessionId) {\n\t\t\t\treturn this.manager.removeSession(sessionId);\n\t\t\t}\n\t\t\t/**\n\t\t\t* Search the Host's visible message-content index. Results stay",
+          "oldStart": 9024
+        }
+      ]
+    },
+    {
+      "pkg": "dsh-client-connection",
+      "rel": "lib/client.js",
+      "patches": [
+        {
+          "old": "\t\tconst sessionCancelValueSchema = object({ accepted: literal(true) });\n\t\t//#endregion",
+          "new": "\t\tconst sessionCancelValueSchema = object({ accepted: literal(true) });\n\t\t/** session.remove response value. */\n\t\tconst sessionRemoveValueSchema = object({ removed: literal(true) });\n\t\t//#endregion",
+          "oldStart": 5459
+        },
+        {
+          "old": "\t\t\t\"subagent.list\": subagentListValueSchema,",
+          "new": "\t\t\t\"session.remove\": sessionRemoveValueSchema,\n\t\t\t\"subagent.list\": subagentListValueSchema,",
+          "oldStart": 6082
+        },
+        {
+          "old": "\t\t\t\tcancel: (payload, signal) => this.callUnary(\"session.cancel\", payload, signal)",
+          "new": "\t\t\t\tcancel: (payload, signal) => this.callUnary(\"session.cancel\", payload, signal),\n\t\t\t\tremove: (payload, signal) => this.callUnary(\"session.remove\", payload, signal)",
+          "oldStart": 6293
+        },
+        {
+          "old": "\t\t\t\t\tcase \"subagent.list\": return this.api.subagents.list(request);",
+          "new": "\t\t\t\t\tcase \"session.remove\": return this.api.sessions.remove(request);\n\t\t\t\t\tcase \"subagent.list\": return this.api.subagents.list(request);",
+          "oldStart": 9904
+        }
+      ]
+    },
+    {
+      "pkg": "dsh-client-ui-workspace",
+      "rel": "lib/client.js",
+      "patches": [
+        {
+          "old": "\t\t* @param props.drag - optional draggable-row wiring.\n\t\t* @param props.flat - omit the empty status slot in the hierarchy-free flat list.\n\t\t* @param props.t - the browser root's locale seat.\n\t\t* @returns the session row.\n\t\t*/\n\t\tfunction SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork, onArchive, drag, flat = false, t }) {",
+          "new": "\t\t* @param props.onDelete - open the session delete confirmation (id + title).\n\t\t* @param props.drag - optional draggable-row wiring.\n\t\t* @param props.flat - omit the empty status slot in the hierarchy-free flat list.\n\t\t* @param props.t - the browser root's locale seat.\n\t\t* @returns the session row.\n\t\t*/\n\t\tfunction SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork, onArchive, onDelete, drag, flat = false, t }) {",
+          "oldStart": 684
+        },
+        {
+          "old": "\t\t\t\t\ticon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconArchiveOutline20, { size: 16 })\n\t\t\t\t}",
+          "new": "\t\t\t\t\ticon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconArchiveOutline20, { size: 16 })\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\tid: \"delete\",\n\t\t\t\t\tlabel: t(\"delete.session\"),\n\t\t\t\t\ticon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconTrashOutline16, {}),\n\t\t\t\t\tdanger: true\n\t\t\t\t}",
+          "oldStart": 711
+        },
+        {
+          "old": "\t\t\t\t\t\t\t\t\tif (id === \"archive\") onArchive(node.id);\n\t\t\t\t\t\t\t\t},",
+          "new": "\t\t\t\t\t\t\t\t\tif (id === \"archive\") onArchive(node.id);\n\t\t\t\t\t\t\t\t\tif (id === \"delete\") onDelete(node.id, row.title);\n\t\t\t\t\t\t\t\t},",
+          "oldStart": 765
+        },
+        {
+          "old": "\t\tfunction SessionTree({ useSessions, startSession, open, forkSession, workspaces, archivedSessionIds, onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive, insertWorkspaceBefore, insertSessionBefore, orderBy, groupExpansion, setGroupExpanded, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, t }) {",
+          "new": "\t\tfunction SessionTree({ useSessions, startSession, open, forkSession, workspaces, archivedSessionIds, onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive, onSessionDelete, insertWorkspaceBefore, insertSessionBefore, orderBy, groupExpansion, setGroupExpanded, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, t }) {",
+          "oldStart": 1196
+        },
+        {
+          "old": "\t\t\t\t\t\t\t\t\t\t\tdrag: {",
+          "new": "\t\t\t\t\t\t\t\t\t\t\tonDelete: onSessionDelete,\n\t\t\t\t\t\t\t\t\t\t\tdrag: {",
+          "oldStart": 1409
+        },
+        {
+          "old": "\t\tfunction FlatList({ useSessions, open, forkSession, onSessionRename, onSessionArchive, archivedSessionIds, orderBy, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, t }) {",
+          "new": "\t\tfunction FlatList({ useSessions, open, forkSession, onSessionRename, onSessionArchive, onSessionDelete, archivedSessionIds, orderBy, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, t }) {",
+          "oldStart": 1465
+        },
+        {
+          "old": "\t\t\t\t\t\t\tflat: true,",
+          "new": "\t\t\t\t\t\t\tonDelete: onSessionDelete,\n\t\t\t\t\t\t\tflat: true,",
+          "oldStart": 1543
+        },
+        {
+          "old": "\t\tfunction WorkspaceBrowser({ wide, expandSidebar, useSessions, useWorkspaces, useStore, actions, startSession, open, renameSession, forkSession, renameWorkspace, deleteWorkspace, insertWorkspaceBefore, archiveSession, insertSessionBefore, createWorkspace, searchSessions, searchResultLimit, useDirectoryFlow, renderSlot, t }) {",
+          "new": "\t\tfunction WorkspaceBrowser({ wide, expandSidebar, useSessions, useWorkspaces, useStore, actions, startSession, open, renameSession, forkSession, renameWorkspace, deleteWorkspace, insertWorkspaceBefore, archiveSession, deleteSession, insertSessionBefore, createWorkspace, searchSessions, searchResultLimit, useDirectoryFlow, renderSlot, t }) {",
+          "oldStart": 1644
+        },
+        {
+          "old": "\t\t\tconst [deleteTarget, setDeleteTarget] = (0, react.useState)(null);",
+          "new": "\t\t\tconst [sessionDeleteTarget, setSessionDeleteTarget] = (0, react.useState)(null);\n\t\t\tconst [sessionDeleting, setSessionDeleting] = (0, react.useState)(false);\n\t\t\tconst [sessionDeleteError, setSessionDeleteError] = (0, react.useState)(null);\n\t\t\tconst onSessionDelete = (sessionId, title) => {\n\t\t\t\tsetSessionDeleteTarget({ sessionId, title });\n\t\t\t\tsetSessionDeleteError(null);\n\t\t\t};\n\t\t\tconst closeSessionDelete = () => {\n\t\t\t\tif (sessionDeleting) return;\n\t\t\t\tsetSessionDeleteTarget(null);\n\t\t\t\tsetSessionDeleteError(null);\n\t\t\t};\n\t\t\tconst confirmSessionDelete = () => {\n\t\t\t\tif (sessionDeleting || sessionDeleteTarget === null) return;\n\t\t\t\tsetSessionDeleting(true);\n\t\t\t\tsetSessionDeleteError(null);\n\t\t\t\tdeleteSession(sessionDeleteTarget.sessionId).then(() => {\n\t\t\t\t\tsetSessionDeleting(false);\n\t\t\t\t\tsetSessionDeleteTarget(null);\n\t\t\t\t}).catch((reason) => {\n\t\t\t\t\tsetSessionDeleting(false);\n\t\t\t\t\tsetSessionDeleteError(reason instanceof Error ? reason.message : String(reason));\n\t\t\t\t});\n\t\t\t};\n\t\t\tconst [deleteTarget, setDeleteTarget] = (0, react.useState)(null);",
+          "oldStart": 1818
+        },
+        {
+          "old": "\t\t\t\t\t\t\tonSessionArchive,\n\t\t\t\t\t\t\tarchivedSessionIds,",
+          "new": "\t\t\t\t\t\t\tonSessionArchive,\n\t\t\t\t\t\t\tonSessionDelete,\n\t\t\t\t\t\t\tarchivedSessionIds,",
+          "oldStart": 1997
+        },
+        {
+          "old": "\t\t\t\t\t\t\tonSessionArchive,\n\t\t\t\t\t\t\tforkSession,",
+          "new": "\t\t\t\t\t\t\tonSessionArchive,\n\t\t\t\t\t\t\tonSessionDelete,\n\t\t\t\t\t\t\tforkSession,",
+          "oldStart": 2008
+        },
+        {
+          "old": "\t\t\t\t\t\t\tchildren: deleteError\n\t\t\t\t\t\t})]\n\t\t\t\t\t})",
+          "new": "\t\t\t\t\t\t\tchildren: deleteError\n\t\t\t\t\t\t})]\n\t\t\t\t\t}),\n\t\t\t\t\t(0, react_jsx_runtime.jsxs)(_deepseek_ai_dsh_client_ui_primitives.Modal, {\n\t\t\t\t\t\topen: sessionDeleteTarget !== null,\n\t\t\t\t\t\tonClose: closeSessionDelete,\n\t\t\t\t\t\tcloseLabel: t(\"close\"),\n\t\t\t\t\t\ttitle: t(\"delete.session\"),\n\t\t\t\t\t\t...sessionDeleteTarget === null ? {} : { description: t(\"delete.session.desc\", { name: sessionDeleteTarget.title }) },\n\t\t\t\t\t\tfooter: (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [(0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {\n\t\t\t\t\t\t\tvariant: \"outline\",\n\t\t\t\t\t\t\tdisabled: sessionDeleting,\n\t\t\t\t\t\t\tonClick: closeSessionDelete,\n\t\t\t\t\t\t\tchildren: t(\"cancel\")\n\t\t\t\t\t\t}), (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {\n\t\t\t\t\t\t\tvariant: \"outline\",\n\t\t\t\t\t\t\tclassName: WorkspaceBrowser_module_css_default.deleteAction,\n\t\t\t\t\t\t\tdisabled: sessionDeleting,\n\t\t\t\t\t\t\tonClick: confirmSessionDelete,\n\t\t\t\t\t\t\tchildren: t(\"delete.session\")\n\t\t\t\t\t\t})] }),\n\t\t\t\t\t\tchildren: [sessionDeleting && (0, react_jsx_runtime.jsx)(\"div\", {\n\t\t\t\t\t\t\tclassName: WorkspaceBrowser_module_css_default.deleteStatus,\n\t\t\t\t\t\t\trole: \"status\",\n\t\t\t\t\t\t\tchildren: t(\"delete.session.pending\")\n\t\t\t\t\t\t}), sessionDeleteError !== null && (0, react_jsx_runtime.jsx)(\"div\", {\n\t\t\t\t\t\t\tclassName: WorkspaceBrowser_module_css_default.renameError,\n\t\t\t\t\t\t\trole: \"alert\",\n\t\t\t\t\t\t\tchildren: sessionDeleteError\n\t\t\t\t\t\t})]\n\t\t\t\t\t})",
+          "oldStart": 2169
+        },
+        {
+          "old": "\t\t\t\"menu.fork\": \"分叉会话\",",
+          "new": "\t\t\t\"delete.session\": \"删除会话\",\n\t\t\t\"delete.session.desc\": \"将永久删除会话“{name}”及其全部记录，此操作不可撤销。\",\n\t\t\t\"delete.session.pending\": \"正在删除会话…\",\n\t\t\t\"menu.fork\": \"分叉会话\",",
+          "oldStart": 2219
+        },
+        {
+          "old": "\t\t\t\"menu.fork\": \"Fork session\",",
+          "new": "\t\t\t\"delete.session\": \"Delete session\",\n\t\t\t\"delete.session.desc\": \"This permanently deletes session “{name}” and all of its records. This cannot be undone.\",\n\t\t\t\"delete.session.pending\": \"Deleting session…\",\n\t\t\t\"menu.fork\": \"Fork session\",",
+          "oldStart": 2284
+        },
+        {
+          "old": "\t\t\t\tinsertSessionBefore: async (workspaceId, sessionId, beforeSessionId) => {",
+          "new": "\t\t\t\tdeleteSession: async (sessionId) => {\n\t\t\t\t\tawait ctx.sessions.remove(sessionId);\n\t\t\t\t},\n\t\t\t\tinsertSessionBefore: async (workspaceId, sessionId, beforeSessionId) => {",
+          "oldStart": 2385
+        }
+      ]
+    }
+  ]
+}

@@ -1,36 +1,36 @@
 @echo off
 rem ============================================================
-rem  Deepseek Harness - 一键打包脚本
-rem  生成安装器 (Setup) + 便携版 (Portable)
+rem  Deepseek Harness - one-click packager
+rem  Builds Setup (installer) + Portable exe into dist\
+rem  (ASCII only on purpose: cmd.exe must not mis-parse this file)
 rem ============================================================
-chcp 65001 >nul
 cd /d "%~dp0"
 
 if not exist "node_modules\electron-builder" (
-  echo [Deepseek Harness] 首次运行，正在安装打包依赖…
+  echo [Deepseek Harness] First run: installing build dependencies...
   call npm install
   if errorlevel 1 (
     echo.
-    echo [Deepseek Harness] 安装失败，请检查网络后重试。
+    echo [Deepseek Harness] Install failed. Check your network and retry.
     pause
     exit /b 1
   )
 )
 
-echo [Deepseek Harness] 开始打包…
+echo [Deepseek Harness] Building...
 echo.
 
 node "node_modules\electron-builder\cli.js" --win --x64 --publish never
 
 if errorlevel 1 (
   echo.
-  echo [Deepseek Harness] 打包失败，请查看上方错误信息。
+  echo [Deepseek Harness] Build failed. See the errors above.
   pause
   exit /b 1
 )
 
 echo.
-echo [Deepseek Harness] 打包完成！产物在 dist 目录：
-echo   - Deepseek Harness-Setup-*.exe      安装器（推荐）
-echo   - Deepseek Harness-Portable-*.exe   便携版（免安装，双击即用）
+echo [Deepseek Harness] Done! Artifacts are in dist:
+echo   - Deepseek Harness-Setup-0.4.9.exe      installer (recommended)
+echo   - Deepseek Harness-Portable-0.4.9.exe   portable (no install)
 pause

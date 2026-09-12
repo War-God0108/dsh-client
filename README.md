@@ -11,11 +11,15 @@
 **方式一：使用打包好的 exe（免 Node 环境）**
 
 ```
-dist\Deepseek Harness-Setup-0.4.0.exe       安装器（推荐，装到开始菜单/桌面快捷方式）
-dist\Deepseek Harness-Portable-0.4.0.exe    便携版（免安装，双击即用，适合放 U 盘）
+dist\Deepseek Harness-Setup-0.5.0.exe       安装器（推荐，装到开始菜单/桌面快捷方式）
+dist\Deepseek Harness-Portable-0.5.0.exe    便携版（免安装，双击即用，适合放 U 盘）
 ```
 
 > 需要本机已安装 Node.js 且能访问网络（首次自动拉起 DSH 时要下载 dsh 包，之后走缓存秒开）。如果 DSH 已在运行（比如你自己开的 `npx @deepseek-ai/dsh web`），桌面端直接复用，不会重复启动。
+>
+> **0.4.8+（适配 DSH 0.1.2+ 访问令牌）**：DSH 0.1.2 起网页版带每进程随机令牌（URL `?token=…`），直接打开裸地址会看到 "dsh web authentication required"。桌面端会自动处理：应用自己拉起的宿主从 `dsh-host.log` 读取令牌完成一次登录换取 30 天 Cookie；由其他程序启动的宿主且无有效 Cookie 时会提示先关闭该程序再重开本应用。
+>
+> **0.5.0（不再弹出浏览器）**：`dsh web` 默认启动后会把界面交给系统默认浏览器（`openBrowser: true`），桌面端会因此多弹一个浏览器窗口。现在应用拉起宿主时固定加 `--no-open`，界面只出现在桌面窗口里；令牌仍然照常打印到 `dsh-host.log`，登录流程不受影响。想恢复"顺带打开浏览器"的旧行为，设 `DSH_OPEN_BROWSER=1` 即可。注意：自己手动跑 `npx @deepseek-ai/dsh web` 时仍会打开浏览器，那是 DSH 自身的行为，需要 `--no-open` 或在本机配置文件里关掉。
 
 **方式二：源码运行**
 
@@ -32,6 +36,7 @@ npm start          # 启动桌面窗口（DSH 未运行时会自动拉起）
 |---|---|---|
 | `DSH_URL` | `http://127.0.0.1:3080` | DSH 实例地址（窗口加载的官方界面来源；自动拉起的服务也会用这个端口） |
 | `DSH_HOME` | `~/.dsh` | 传给自动拉起的 DSH 服务的数据目录（默认使用与网页版相同的数据） |
+| `DSH_OPEN_BROWSER` | 关（即加 `--no-open`） | 设为 `1` / `true` 时，自动拉起的宿主仍会把界面交给系统默认浏览器（旧行为，会多弹一个浏览器窗口） |
 | `DSH_CLIENT_DEBUG` | 无 | 设为文件路径可输出启动过程调试日志（排查问题用） |
 
 ## 打包 exe（重新构建安装器）
@@ -65,7 +70,21 @@ npm run dist       # 或双击「打包exe.cmd」
 
 - **桌面壳层**：独立应用、任务栏图标、单实例锁（重复启动聚焦已有窗口）、外链交给系统浏览器、深色主题窗口
 - **自动拉起 DSH**：检测到本地 DSH 未运行就自动启动（隐藏控制台，启动中显示过渡页），关闭应用时自动结束拉起的服务；已有实例则直接复用
+- **自动适配访问令牌（DSH 0.1.2+）**：自动解析自己拉起的宿主打印的 `?token=` URL 完成登录（换取 30 天 Cookie，之后直开裸地址即可）；外部宿主无 Cookie 时给出中文引导
 - **界面与功能**：与官方网页完全一致（会话管理、流式对话、工具调用、上下文、遥测、设置、主题等，全部由 DSH 网页界面提供）
+- **会话删除补丁**：每次启动时自动把「删除会话」功能补丁应用到 npx 缓存中的 DSH 包（`electron/patch-delete-session.mjs` + `delete-session-patch.json`），幂等且对包升级失败安全（版本不匹配时报错而不是写坏文件），DSH 包重装/缓存清理后下次启动自动恢复
+
+## 「删除会话」补丁说明
+
+DSH 官方网页尚未提供「删除会话」入口，本仓库通过补丁为其添加：侧边栏会话三点菜单新增「删除会话」（重命名 → 分叉会话 → 归档会话 → 删除会话），确认后永久删除会话（停止运行中的代理、移除工作区关联、删除持久化日志）。
+
+补丁作用在 npx 缓存里的 DSH 包文件（`%LOCALAPPDATA%\npm-cache\_npx\<hash>\node_modules\@deepseek-ai\...`），因此：
+
+- 桌面应用每次启动（拉起宿主前）自动应用，幂等——包被重装、缓存被清理后，下次启动自动恢复；
+- 不用桌面应用、直接命令行 `npx @deepseek-ai/dsh web` 时，可手动执行：`node electron/patch-delete-session.mjs`；
+- **按 DSH 版本分集（`delete-session-patch.json` v2）**：应用器读取 npx 根里 `@deepseek-ai/dsh` 的版本前缀，选择对应补丁集——`0.1.2` 集适配 0.1.2-rc.1（宿主 session-controller 的 `session/remove` RPC、typert remote/host 契约、浏览器 Session.remove、工作区 UI 菜单与确认弹窗），`0.1.0-rc.6` 集保留旧版目标；没有对应补丁集的版本一律跳过不动；
+- 每个补丁锚点必须精确命中一次，版本漂移时报告 `MISMATCH`（含锚点片段）而不是写坏文件——升级后若报错，把日志行发回即可重新生成锚点；
+- 彻底根治需上游合并：把改动整理成源码 diff 提交到 deepseek-ai/deepseek-harness，官方版本发布后即可移除补丁。
 
 ## 历史实现（保留参考）
 
