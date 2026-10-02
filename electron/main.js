@@ -15,7 +15,6 @@
 import { app, BrowserWindow, shell, dialog, session, screen } from 'electron';
 import { spawn } from 'node:child_process';
 import { openSync, appendFileSync, writeSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
-import { applyToRoot, npxRoots } from './patch-delete-session.mjs';
 import { installPlugin } from './install-plugin.mjs';
 
 let win = null;
@@ -355,35 +354,23 @@ async function createWindow() {
   debugLog('createWindow start');
   lifeLog('createWindow');
   // Deploy the "Delete session" (删除会话) Host plugin into the DSH profile
-  // BEFORE the host is probed or spawned. The deletion logic itself lives in
-  // that plugin (an ordinary user plugin under $DSH_HOME/profiles), so a DSH
-  // upgrade cannot take it away; the patch below only contributes the two
-  // things a plugin cannot reach — the sidebar menu item and the live Agent
-  // teardown hook. Both steps are idempotent.
+  // BEFORE the host is probed or spawned. The deletion logic lives entirely in
+  // that plugin (an ordinary user plugin under $DSH_HOME/profiles) and reaches
+  // the browser through its own /api/dsd route, so a DSH upgrade cannot take it
+  // away. Idempotent: only differing files are written and the profile entry is
+  // mounted when missing.
+  //
+  // Historical note: DSH 0.1.x also required patching the DSH packages inside
+  // the npm npx cache (that is where the sidebar menu item and a live-Agent
+  // teardown hook came from). DSH 0.2 replaced that generated RPC surface and
+  // added the official slot `sidebar.workspaces.session.menu.item`, so the
+  // patch machinery was retired — see legacy/README.md.
   try {
     const report = installPlugin({ log: (message) => lifeLog(`session-delete plugin: ${message}`) });
     for (const error of report.errors) lifeLog(`session-delete plugin error: ${error}`);
     lifeLog(`session-delete plugin: deployed=${report.deployed} mounted=${report.mounted.length} already=${report.alreadyMounted.length}`);
   } catch (err) {
     lifeLog(`session-delete plugin deployment failed: ${err?.message ?? err}`);
-  }
-  // Apply the "Delete session" (删除会话) feature patch to the DSH host
-  // packages in the npm npx cache BEFORE the host is probed or spawned, so a
-  // package reinstall or cache clean cannot silently drop the feature. The
-  // patch is idempotent; if the host is already running (adopted), the change
-  // takes effect on its next boot.
-  try {
-    const patchRoots = npxRoots();
-    if (patchRoots.length === 0) {
-      lifeLog('delete-session patch: no DSH package root found (npx cache absent?)');
-    }
-    for (const root of patchRoots) {
-      const result = applyToRoot(root);
-      lifeLog(`delete-session patch under ${root}: ${result.changed} patched, ${result.skipped} up-to-date, ${result.failed} failed`);
-      debugLog(`delete-session patch under ${root}: ${JSON.stringify(result)}`);
-    }
-  } catch (err) {
-    lifeLog(`delete-session patch failed: ${err?.message ?? err}`);
   }
   // Stay within the available work area. Electron's screen API and
   // BrowserWindow both report device-independent pixels (the renderer DPR is
@@ -825,10 +812,10 @@ if (!gotLock) {
       return permission === 'media';
     });
     // The DSH host serves client modules and the page shell with long-lived
-    // (immutable-style) cache headers. Our delete-session patch rewrites those
-    // module files before each launch, so a persisted HTTP cache would keep
-    // serving pre-patch copies to the window. Clear it every boot so freshly
-    // patched bundles always reach the renderer.
+    // (immutable-style) cache headers, and the bundled user plugins are
+    // rewritten in place when they are updated. A persisted HTTP cache would
+    // keep serving the previous bundle to the window, so clear it every boot
+    // and let the renderer fetch what is actually on disk.
     try {
       await session.defaultSession.clearCache();
       await session.defaultSession.clearCodeCaches({});

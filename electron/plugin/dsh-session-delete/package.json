@@ -1,13 +1,22 @@
 {
   "name": "dsh-session-delete",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
-  "description": "DSH 删除会话插件：为侧边栏会话菜单提供真正的「删除会话」（停止活动 Agent、解绑工作区、删除持久化日志）",
+  "description": "DSH 删除会话插件：侧边栏会话菜单「删除会话」（停止活动 Agent、解绑工作区、删除持久化日志）+ /api/dsd 宿主接口",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
+    "./client": "./lib/client.js",
     "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
+    }
   },
   "license": "MIT"
 }

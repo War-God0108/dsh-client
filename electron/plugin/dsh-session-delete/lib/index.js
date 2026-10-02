@@ -1,4 +1,4 @@
-// dsh-session-delete — Host 半端（DSH 0.1.5+）
+// dsh-session-delete — Host 半端（DSH 0.1.5+ 与 0.2.x）
 //
 // 为浏览器端提供「删除会话」接口（HTTP 通道 /api/dsd）：
 //   probe  探测当前宿主是否具备完整删除能力（活动 Agent 拆除钩子是否已打补丁）
@@ -9,11 +9,16 @@
 // 路由本身已完成 Host/Origin 校验与浏览器会话鉴权，这里不需要再做鉴权。
 //
 // 为什么删除逻辑放在插件里而不是补丁里：
-//   本功能只有两处必须改动 DSH 自身包文件——(1) 侧边栏会话三点菜单项、
+//   DSH 0.1.x 时代只有两处必须改动 DSH 自身包文件——(1) 侧边栏会话三点菜单项、
 //   (2) 活动 Agent 的拆除句柄（AgentHandle 只发给创建者，官方无公开 API）。
-//   其余全部逻辑（定位产物、删除、解绑、广播）都放在本插件中：DSH 升级后只要
-//   本插件仍在，冷会话删除就仍然可用；即使补丁锚点漂移、活动会话删除失效，
-//   本插件也会给出可操作的错误提示，而不是静默失败。
+//   0.2 起这两处都不再需要补丁：
+//   (1) 官方提供了扩展槽位 `sidebar.workspaces.session.menu.item`，本插件自带的
+//       浏览器半端（lib/client.js）在其中注册「删除会话」菜单项与确认弹窗；
+//   (2) 活动会话的拆除改用公开注册表原语复刻官方 agent-loop 的 dispose 顺序
+//       （cancel → whenIdle → scope.dispose → detach agent → detach session）。
+//   其余全部逻辑（定位产物、删除、解绑、广播）本来就在本插件中：DSH 升级后只要
+//   本插件仍在，删除就仍然可用；即使某个版本缺少拆除能力，本插件也会给出可操作
+//   的错误提示，而不是静默失败。
 export const name = "session-delete";
 
 /** 唯一硬依赖：没有 /api 通道就没有浏览器入口。其余服务按需解析并给出明确错误。 */
@@ -73,16 +78,8 @@ function ownedBySubagentRouting(s, header, agent) {
   return parent !== undefined && agents.isOwnedBy(agent.id, parent);
 }
 
-/** 让活动 Agent 变得可删除：先 flush，再调用补丁暴露的拆除钩子。 */
+/** 让活动 Agent 变得可删除：先 flush，再走 0.1.x 补丁钩子或 0.2 的公开拆除原语。 */
 async function tearDownLiveAgent(s, sessionId) {
-  const controller = s.get("sessionController");
-  const dispose = controller?.agents?.disposeAgent;
-  if (typeof dispose !== "function") {
-    throw new DeleteError(
-      "patch-missing",
-      "该会话仍在运行，需要先应用补丁才能停止它。请运行 install.cmd 重新应用补丁后重启 DSH。",
-    );
-  }
   const sessions = need(s, "sessions");
   const live = sessions.get(sessionId);
   if (live !== undefined) {
@@ -92,10 +89,35 @@ async function tearDownLiveAgent(s, sessionId) {
       await sessions.flush(live);
     } catch { /* flush 失败不阻断拆除 */ }
   }
-  const disposed = await dispose.call(controller.agents, sessionId);
-  if (!disposed) {
-    throw new DeleteError("agent-busy", `无法停止会话 "${sessionId}" 的运行时（非本进程 API 创建），未执行删除`);
+  const controller = s.get("sessionController");
+  /* 优先用「保留句柄」拆除：AgentHandle 只发给创建者，控制器保留的句柄是官方
+     认可的拆除路径。0.2 起 `ApiSessionAgentController.disposeAgent(sessionId)`
+     是官方 API（挂在 sessionController.agents 上），0.1.x 时代它由补丁加在同一
+     位置；两种形状（agents 上 / 服务本身）都试一遍。 */
+  for (const holder of [controller?.agents, controller]) {
+    const hook = holder?.disposeAgent;
+    if (typeof hook !== "function") continue;
+    const disposed = await hook.call(holder, sessionId);
+    if (disposed === false) {
+      throw new DeleteError("agent-busy", `无法停止会话 "${sessionId}" 的运行时（非本进程 API 创建），未执行删除`);
+    }
+    return;
   }
+  /* 兜底：用公开注册表复刻官方 agent-loop 的 dispose 顺序
+     （cancel → whenIdle → scope.dispose → detach agent → detach session）。
+     两次 detachEntered 分别发出 agent/disposed 与 session/disposed，后者由
+     session-controller 转成 api-session/removed 广播给浏览器。 */
+  const agents = s.get("agents");
+  const entry = typeof agents?.store?.get === "function" ? agents.store.get(sessionId) : undefined;
+  if (entry === undefined || entry === null) return; /* 冷会话：没有运行时需要拆除 */
+  entry.agent.cancel({ kind: "disposed" });
+  if (typeof entry.agent.whenIdle === "function") await entry.agent.whenIdle();
+  const scope = entry.agent.scope;
+  if (scope !== undefined && scope !== null && typeof scope.dispose === "function") await scope.dispose();
+  const agentEntry = agents.store.get(sessionId);
+  if (agentEntry !== undefined && typeof agents.detachEntered === "function") agents.detachEntered(agentEntry);
+  const sessionEntry = typeof sessions.store?.get === "function" ? sessions.store.get(sessionId) : undefined;
+  if (sessionEntry !== undefined && typeof sessions.detachEntered === "function") sessions.detachEntered(sessionEntry);
 }
 
 /** 从各工作区解绑（失败只记录，不阻断删除）。 */
@@ -145,9 +167,22 @@ async function removeArtifacts(s, header) {
 /** 探测删除能力（浏览器端可据此给出可操作提示）。 */
 async function probe(s) {
   const controller = s.get("sessionController");
+  const agents = s.get("agents");
+  const sessions = s.get("sessions");
+  const disposeOnAgents = typeof controller?.agents?.disposeAgent === "function";
+  const disposeOnService = typeof controller?.disposeAgent === "function";
+  const nativeTeardown = typeof agents?.store?.get === "function"
+    && typeof agents?.detachEntered === "function"
+    && (typeof sessions?.detachEntered === "function" || sessions?.store === undefined);
   return {
-    disposedHook: typeof controller?.agents?.disposeAgent === "function",
+    disposedHook: disposeOnAgents || disposeOnService,
+    disposeOnAgents,
+    disposeOnService,
+    nativeTeardown,
+    canStopLive: disposeOnAgents || disposeOnService || nativeTeardown,
     located: typeof s.get("sessionPersistence")?.locate === "function",
+    /* 诊断：控制器实际暴露了哪些成员（升级后排查用）。 */
+    controllerKeys: controller === undefined || controller === null ? [] : Object.keys(controller).slice(0, 40),
   };
 }
 

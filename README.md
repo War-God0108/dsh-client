@@ -79,19 +79,20 @@ npm run dist       # 或双击「打包exe.cmd」
 - **自动拉起 DSH**：检测到本地 DSH 未运行就自动启动（隐藏控制台，启动中显示过渡页），关闭应用时自动结束拉起的服务；已有实例则直接复用
 - **自动适配访问令牌（DSH 0.1.2+）**：自动解析自己拉起的宿主打印的 `?token=` URL 完成登录（换取 30 天 Cookie，之后直开裸地址即可）；外部宿主无 Cookie 时给出中文引导
 - **界面与功能**：与官方网页完全一致（会话管理、流式对话、工具调用、上下文、遥测、设置、主题等，全部由 DSH 网页界面提供）
-- **会话删除补丁**：每次启动时自动把「删除会话」功能补丁应用到 npx 缓存中的 DSH 包（`electron/patch-delete-session.mjs` + `delete-session-patch.json`），幂等且对包升级失败安全（版本不匹配时报错而不是写坏文件），DSH 包重装/缓存清理后下次启动自动恢复
+- **会话删除（插件，不靠补丁）**：启动时把 `dsh-session-delete` 宿主插件部署进 `$DSH_HOME/profiles`（`electron/install-plugin.mjs` + `electron/plugin/dsh-session-delete/`），删除逻辑全部在插件里、经它自己的 `/api/dsd` 路由暴露给浏览器，DSH 升级不会带走它
 
-## 「删除会话」补丁说明
+## 「删除会话」插件说明
 
-DSH 官方网页尚未提供「删除会话」入口，本仓库通过补丁为其添加：侧边栏会话三点菜单新增「删除会话」（重命名 → 分叉会话 → 归档会话 → 删除会话），确认后永久删除会话（停止运行中的代理、移除工作区关联、删除持久化日志）。
+DSH 官方网页尚未提供「删除会话」入口，本仓库用一个**普通用户插件**补上（`electron/plugin/dsh-session-delete/`，双半端）：
 
-补丁作用在 npx 缓存里的 DSH 包文件（`%LOCALAPPDATA%\npm-cache\_npx\<hash>\node_modules\@deepseek-ai\...`），因此：
-
-- 桌面应用每次启动（拉起宿主前）自动应用，幂等——包被重装、缓存被清理后，下次启动自动恢复；
-- 不用桌面应用、直接命令行 `npx @deepseek-ai/dsh web` 时，可手动执行：`node electron/patch-delete-session.mjs`；
-- **按 DSH 版本分集（`delete-session-patch.json` v2）**：应用器读取 npx 根里 `@deepseek-ai/dsh` 的版本前缀，选择对应补丁集——`0.1.2` 集适配 0.1.2-rc.1（宿主 session-controller 的 `session/remove` RPC、typert remote/host 契约、浏览器 Session.remove、工作区 UI 菜单与确认弹窗），`0.1.0-rc.6` 集保留旧版目标；没有对应补丁集的版本一律跳过不动；
-- 每个补丁锚点必须精确命中一次，版本漂移时报告 `MISMATCH`（含锚点片段）而不是写坏文件——升级后若报错，把日志行发回即可重新生成锚点；
-- 彻底根治需上游合并：把改动整理成源码 diff 提交到 deepseek-ai/deepseek-harness，官方版本发布后即可移除补丁。
+- **浏览器半端**（`lib/client.js`）：往官方扩展槽位 `sidebar.workspaces.session.menu.item` 注册「删除会话」菜单项（危险样式，排在官方「归档会话」之后），并在 `shell.overlay` 注册确认弹窗（中英双语文案，失败时把宿主的错误码翻译成可操作提示）；
+- **宿主半端**（`lib/index.js`）：在 `/api/dsd` 暴露 `probe` / `delete` 两个端点——删除时先 `flush`、再停掉活动 Agent、从各工作区解绑、删除持久化日志（`session.jsonl[.zstd]` 与会话目录），最后广播 `api-session/removed` 让所有浏览器立刻移除该行；由子代理拥有的会话会被拒绝；
+- **活动会话的拆除**：优先调用官方 `sessionController.agents.disposeAgent(sessionId)`（DSH 0.2 的 `ApiSessionAgentController.disposeAgent` 就是官方 API——控制器保留的 `AgentHandle` 是官方认可的拆除路径；0.1.x 时代同一位置由补丁提供，两种形状都会尝试）；拿不到该 API 时，用公开注册表原语复刻官方 agent-loop 的 dispose 顺序兜底（`cancel({kind:"disposed"})` → `whenIdle()` → `scope.dispose()` → `agents.detachEntered` → `sessions.detachEntered`）；`disposeAgent` 返回 `false`（句柄不属于本进程）时报 `agent-busy` 而不是误删；
+- **部署方式**：桌面应用每次启动（拉起宿主前）调用 `install-plugin.mjs`，把**应用包内**的 `electron/plugin/dsh-session-delete` 复制进 `%USERPROFILE%\.dsh\profiles\node_modules\dsh-session-delete`（先删后拷，覆盖旧副本），并在 `cordis.patch.yml` 挂载 `- id: session-delete`（已挂载则跳过）。⚠️ 因此**改了插件必须重新打包/安装桌面端**，否则每次启动都会被应用包里的旧副本覆盖；或者直接双击 `启动桌面客户端.cmd` 以源码方式运行（它部署的就是当前源码里的插件）。另外，新增客户端半端需要**重启一次 DSH** 才会进入客户端模块表，之后改动走 client-hmr；
+- 直接命令行 `npx @deepseek-ai/dsh web` 时，可手动执行 `node electron/install-plugin.mjs` 后重启 DSH；
+- **探测与调用**：`POST /api/dsd` + `{"endpoint":"probe"}` → `{disposedHook, disposeOnAgents, disposeOnService, nativeTeardown, canStopLive, located, controllerKeys}`（`controllerKeys` 是升级后排查用的诊断字段）；删除：`{"endpoint":"delete","payload":{"sessionId":"…"}}`；
+- **自检**：重启后运行 `powershell -ExecutionPolicy Bypass -File verify-session-delete.ps1`（检查客户端半端是否进入启动清单、bundle 是否含菜单项与 `/api/dsd`、宿主能力探测），再按脚本末尾的肉眼清单点一次菜单；
+- 0.1.x 时代的 npx 缓存补丁机制已停用并移入 `legacy/`（0.2 不再支持手改生成式 typert 端点表），仅为历史参考，见 `legacy/README.md`。
 
 ## 历史实现（保留参考）
 
@@ -100,12 +101,16 @@ DSH 官方网页尚未提供「删除会话」入口，本仓库通过补丁为�
 ## 测试
 
 ```bash
+node test-session-delete-host.mjs    # 「删除会话」宿主半端：拆除顺序、解绑、文件清理、围栏（无需 DSH）
+node test-session-delete-client.mjs  # 「删除会话」浏览器半端：槽位注册、菜单项、确认弹窗、/api/dsd（无需 DSH）
 node test-electron-runtime.mjs  # 内嵌代理冒烟（旧代理栈，需 DSH 运行）
 node test-ws.mjs                # WS 下行代理冒烟（旧代理栈）
 node test-e2e.mjs               # 全链路（旧代理栈，需 DSH 运行，会创建临时会话）
 node test-dom-jsdom.mjs         # DOM 集成（旧自定义界面）
 python smoke-spawn-test.py      # 桌面端冒烟：验证"自己拉起宿主 -> 窗口正常渲染"这条路径
 ```
+
+`test-session-delete-host.mjs` 用假的服务注册表驱动真实的 `deleteSession` / `probe`，断言拆除顺序与官方 `agent-loop` 的 dispose 一致（`cancel({kind:"disposed"})` → `whenIdle` → `scope.dispose` → `detach agent` → `detach session`）、工作区解绑、产物文件与目录被删除、冷会话可删、未知会话返回 `not-found`、子代理会话被拒（`agent-busy`）；`test-session-delete-client.mjs` 捕获 `__ModuleLoader__.load` 后用 React 桩件跑真实 bundle，断言槽位注册（含 `order: 500`）、菜单项文案与危险样式、确认弹窗的「取消/删除」两条路径、`/api/dsd` 请求体与错误码翻译。两者都不需要 DSH 在跑，也不依赖磁盘上的 react。
 
 `smoke-spawn-test.py` 会用 `DSH_URL=http://127.0.0.1:3099` 启动打包产物，确认它确实拉起了宿主、界面挂载完成（日志出现 `UI mounted after ~Xs`）、窗口渲染出真实界面（按窗口区域抓屏做像素采样，不是只看日志）、没有触发看门狗或恢复页，并在结束时把拉起的进程全部清掉。运行前需先关闭已打开的桌面端（单实例锁）。
 
@@ -116,9 +121,12 @@ dsh-client/
 ├── 启动桌面客户端.cmd    # 双击启动（Windows）
 ├── 打包exe.cmd           # 双击重新打包 exe
 ├── electron/
-│   └── main.js          # Electron 主进程（窗口壳层，加载官方界面）
+│   ├── main.js                        # Electron 主进程（窗口壳层，加载官方界面）
+│   ├── install-plugin.mjs             # 部署「删除会话」宿主插件（幂等）
+│   └── plugin/dsh-session-delete/     # 「删除会话」宿主插件（/api/dsd）
 ├── build/               # 应用图标（icon.ico / whale.svg 等）
 ├── dist/                # 打包产物（Setup / Portable）
+├── legacy/              # 停用的 npx 缓存补丁机制（0.1.x 时代，见 legacy/README.md）
 ├── server.js            # （历史）本地代理，不再参与打包
 ├── ws-server.js         # （历史）RFC6455 WS 服务器，不再参与打包
 ├── public/              # （历史）自定义控制台界面，不再参与打包

@@ -31,6 +31,6 @@ if errorlevel 1 (
 
 echo.
 echo [Deepseek Harness] Done! Artifacts are in dist:
-echo   - Deepseek Harness-Setup-0.4.9.exe      installer (recommended)
-echo   - Deepseek Harness-Portable-0.4.9.exe   portable (no install)
+echo   - Deepseek Harness-Setup-*.exe      installer (recommended)
+echo   - Deepseek Harness-Portable-*.exe   portable (no install)
 pause
